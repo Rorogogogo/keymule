@@ -35,6 +35,35 @@ Agent:  Build #482 failed in "Integration tests"…
 - 🚫 **No reveal command.** There is deliberately no `keymule get`; an agent with a shell could just run it.
 - 📒 **Audit log.** Every request is logged to `~/.config/keymule/audit.log` (without secrets).
 - 🧩 **Service presets.** Bamboo, GitHub (incl. Actions), GitLab, Jenkins, or any HTTP API. Presets know the auth scheme, how to verify a token, and give the agent an API cheat-sheet.
+- 🩺 **Leak doctor.** `keymule doctor` finds tokens that already leaked into agent transcripts, sit in plain text in agent configs, or are readable in `.env` files and shell history, so you know what to rotate.
+
+---
+
+## 🩺 Find what already leaked
+
+Example output (made-up values):
+
+```text
+$ keymule doctor
+keymule doctor: scanned 48 agent transcripts (390 MB), 5 agent configs, 2 .env files, 1 shell histories
+
+🔴 Sent to an AI model: rotate these (2)
+  sk_l…7Qa     Stripe live key
+      seen in       Codex session in ~/code/shop (2026-03-02)
+  ac_4…k9P     ACME_API_KEY
+      seen in       Claude Code session in ~/code/api ×3 (latest 2026-04-11)
+      plain text in ~/.claude.json · acme.env.ACME_API_KEY
+
+🟠 Plain text in agent configs: move these into keymule (1)
+  ghp_…T4x     GitHub token
+      plain text in ~/.cursor/mcp.json · github.env.GITHUB_TOKEN
+```
+
+It reads `~/.claude/projects`, `~/.codex/sessions`, the Claude Code, Codex, Cursor and Claude
+Desktop configs, `.env` files in the current project and your home folder, and shell history. A
+few hundred MB takes a few seconds. Secrets are always masked and nothing leaves your machine.
+`--all` also lists unsure matches, and `--json` gives machine-readable output. Agents can run the
+same scan with the `scan_for_leaks` MCP tool: *"did any of my tokens leak?"*
 
 ---
 
@@ -85,6 +114,7 @@ up to `settings.json.keymule-bak`.
 | `add_credential` | Opens a secure dialog for the user to type the secret; verifies and stores it |
 | `rotate_credential` | Same dialog, for a new token on an existing credential |
 | `update_credential` | Change URL, username or description; a new host needs the user's approval in a dialog |
+| `scan_for_leaks` | Run the doctor and return masked results |
 
 The secret never travels through the MCP connection. There is no tool that takes or returns one.
 

@@ -312,16 +312,13 @@ mod tests {
 
     #[test]
     fn deep_scan_finds_env_vars_url_passwords_and_bearer() {
-        let text = r#"JOBJOURNEY_API_KEY=jj_9fK2mQ7xL4pR8vT1wZ3c postgres://app:Hunter2Secret9@db:5432/x curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.k3Jd8Qp2Lm""#;
+        let text = r#"ACME_API_KEY=ac_9fK2mQ7xL4pR8vT1wZ3c postgres://app:Hunter2Secret9@db:5432/x curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.k3Jd8Qp2Lm""#;
         let f = scan_deep(text);
         let labels: Vec<_> = f
             .iter()
             .map(|x| x.label.clone().unwrap_or_default())
             .collect();
-        assert!(
-            labels.contains(&"JOBJOURNEY_API_KEY".to_string()),
-            "{labels:?}"
-        );
+        assert!(labels.contains(&"ACME_API_KEY".to_string()), "{labels:?}");
         assert!(
             labels.contains(&"postgres URL password".to_string()),
             "{labels:?}"
