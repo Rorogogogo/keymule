@@ -1,5 +1,5 @@
-//! `agentkey init`: register the MCP server, install the paste hook, and
-//! tell the agent (via CLAUDE.md) to use agentkey instead of asking for tokens.
+//! `keymule init`: register the MCP server, install the paste hook, and
+//! tell the agent (via CLAUDE.md) to use keymule instead of asking for tokens.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7,12 +7,12 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 
-const MD_START: &str = "<!-- agentkey:start -->";
-const MD_END: &str = "<!-- agentkey:end -->";
-const MD_BLOCK: &str = "## Credentials (agentkey)
-- API tokens and passwords are stored in agentkey. Use the `agentkey` MCP tools (`list_credentials`, then `http_request`) for any service that needs auth, e.g. Bamboo, GitHub Actions, GitLab, Jenkins.
+const MD_START: &str = "<!-- keymule:start -->";
+const MD_END: &str = "<!-- keymule:end -->";
+const MD_BLOCK: &str = "## Credentials (keymule)
+- API tokens and passwords are stored in keymule. Use the `keymule` MCP tools (`list_credentials`, then `http_request`) for any service that needs auth, e.g. Bamboo, GitHub Actions, GitLab, Jenkins.
 - Never ask me to paste a token, password or API key into the chat. If a credential is missing, call `add_credential`: it opens a secure dialog where I type the secret. Ask me for the base URL first if the service needs one.
-- Never try to read secrets from the keychain, `security`, or agentkey's files.";
+- Never try to read secrets from the keychain, `security`, or keymule's files.";
 
 fn home() -> Result<PathBuf> {
     std::env::var_os("HOME")
@@ -40,16 +40,16 @@ pub fn run(dry_run: bool) -> Result<()> {
     let has_claude = Command::new("claude").arg("--version").output().is_ok();
     if has_claude {
         let exists = Command::new("claude")
-            .args(["mcp", "get", "agentkey"])
+            .args(["mcp", "get", "keymule"])
             .output()
             .is_ok_and(|o| o.status.success());
         if exists {
-            println!("· MCP server `agentkey` already registered in Claude Code");
+            println!("· MCP server `keymule` already registered in Claude Code");
         } else {
             if !dry_run {
                 let status = Command::new("claude")
                     .args([
-                        "mcp", "add", "--scope", "user", "agentkey", "--", &exe_s, "mcp",
+                        "mcp", "add", "--scope", "user", "keymule", "--", &exe_s, "mcp",
                     ])
                     .status()
                     .context("running `claude mcp add`")?;
@@ -58,8 +58,8 @@ pub fn run(dry_run: bool) -> Result<()> {
                 }
             }
             say(
-                "registered MCP server `agentkey` (user scope)",
-                &format!("run: claude mcp add --scope user agentkey -- {exe_s} mcp"),
+                "registered MCP server `keymule` (user scope)",
+                &format!("run: claude mcp add --scope user keymule -- {exe_s} mcp"),
             );
         }
     } else {
@@ -87,23 +87,23 @@ pub fn run(dry_run: bool) -> Result<()> {
     let md = home.join(".claude").join("CLAUDE.md");
     if install_md(&md, dry_run)? {
         say(
-            &format!("added agentkey instructions to {}", md.display()),
-            &format!("append an agentkey section to {}", md.display()),
+            &format!("added keymule instructions to {}", md.display()),
+            &format!("append an keymule section to {}", md.display()),
         );
     } else {
-        println!("· {} already mentions agentkey", md.display());
+        println!("· {} already mentions keymule", md.display());
     }
 
     println!(
-        "\nOther agents (manual for now):\n  Codex  ~/.codex/config.toml\n    [mcp_servers.agentkey]\n    command = \"{exe_s}\"\n    args = [\"mcp\"]\n  Cursor ~/.cursor/mcp.json\n    \"agentkey\": {{ \"command\": \"{exe_s}\", \"args\": [\"mcp\"] }}"
+        "\nOther agents (manual for now):\n  Codex  ~/.codex/config.toml\n    [mcp_servers.keymule]\n    command = \"{exe_s}\"\n    args = [\"mcp\"]\n  Cursor ~/.cursor/mcp.json\n    \"keymule\": {{ \"command\": \"{exe_s}\", \"args\": [\"mcp\"] }}"
     );
     if !dry_run {
-        println!("\nRestart Claude Code, then try: agentkey add bamboo");
+        println!("\nRestart Claude Code, then try: keymule add bamboo");
     }
     Ok(())
 }
 
-/// Adds the hook unless an agentkey hook is already there. Returns whether it changed anything.
+/// Adds the hook unless an keymule hook is already there. Returns whether it changed anything.
 pub fn install_hook(path: &Path, command: &str, dry_run: bool) -> Result<bool> {
     let mut root: Value = match std::fs::read_to_string(path) {
         Ok(text) if !text.trim().is_empty() => {
@@ -130,7 +130,7 @@ pub fn install_hook(path: &Path, command: &str, dry_run: bool) -> Result<bool> {
             hs.iter().any(|h| {
                 h["command"]
                     .as_str()
-                    .is_some_and(|c| c.contains("agentkey") && c.contains("hook prompt"))
+                    .is_some_and(|c| c.contains("keymule") && c.contains("hook prompt"))
             })
         })
     });
@@ -140,7 +140,7 @@ pub fn install_hook(path: &Path, command: &str, dry_run: bool) -> Result<bool> {
     arr.push(json!({ "hooks": [{ "type": "command", "command": command, "timeout": 10 }] }));
     if !dry_run {
         if path.exists() {
-            std::fs::copy(path, path.with_extension("json.agentkey-bak"))?;
+            std::fs::copy(path, path.with_extension("json.keymule-bak"))?;
         } else if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -196,12 +196,12 @@ mod tests {
             r#"{"model":"opus","hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"other"}]}]}}"#,
         )
         .unwrap();
-        assert!(install_hook(&p, "'/bin/agentkey' hook prompt", false).unwrap());
-        assert!(!install_hook(&p, "'/bin/agentkey' hook prompt", false).unwrap());
+        assert!(install_hook(&p, "'/bin/keymule' hook prompt", false).unwrap());
+        assert!(!install_hook(&p, "'/bin/keymule' hook prompt", false).unwrap());
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
         assert_eq!(v["model"], "opus");
         assert_eq!(v["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 2);
-        assert!(p.with_extension("json.agentkey-bak").exists());
+        assert!(p.with_extension("json.keymule-bak").exists());
     }
 
     #[test]
@@ -212,7 +212,7 @@ mod tests {
         assert!(install_md(&p, false).unwrap());
         assert!(!install_md(&p, false).unwrap());
         let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text.starts_with("# mine\n\n<!-- agentkey:start -->"));
+        assert!(text.starts_with("# mine\n\n<!-- keymule:start -->"));
     }
 
     #[test]
@@ -233,6 +233,6 @@ mod tests {
 
     #[test]
     fn quotes_paths_with_spaces() {
-        assert_eq!(shell_quote("/a b/agentkey"), "'/a b/agentkey'");
+        assert_eq!(shell_quote("/a b/keymule"), "'/a b/keymule'");
     }
 }

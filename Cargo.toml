@@ -1,11 +1,11 @@
 [package]
-name = "agentkey"
+name = "keymule"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Let AI coding agents use your API tokens and passwords without ever seeing them"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Rorogogogo/agentkey"
+repository = "https://github.com/Rorogogogo/keymule"
 readme = "README.md"
 keywords = ["mcp", "claude-code", "secrets", "credentials", "cli"]
 categories = ["command-line-utilities", "development-tools", "authentication"]

@@ -13,7 +13,7 @@ use reqwest::{Method, StatusCode, Url};
 use crate::presets;
 use crate::store::{Auth, Credential, config_dir, host_of};
 
-pub const REDACTED: &str = "[redacted by agentkey]";
+pub const REDACTED: &str = "[redacted by keymule]";
 const MAX_REDIRECTS: usize = 5;
 const HARD_BODY_CAP: usize = 20 * 1024 * 1024;
 
@@ -55,7 +55,7 @@ impl Response {
         );
         if self.truncated {
             out.push_str(&format!(
-                "\n\n[agentkey: body is {} bytes, showing {} of it; pass a larger max_bytes, or keep_tail=true for logs]",
+                "\n\n[keymule: body is {} bytes, showing {} of it; pass a larger max_bytes, or keep_tail=true for logs]",
                 self.total_bytes,
                 if self.body.is_empty() { "none" } else { "part" }
             ));
@@ -73,7 +73,7 @@ pub fn resolve_url(name: &str, cred: &Credential, path: &str) -> Result<Url> {
             bail!(
                 "credential \"{name}\" has no base URL yet. Ask the user for it, then call \
                  update_credential (they approve the host in a dialog), or have them run \
-                 `agentkey edit {name} --url <base url>`."
+                 `keymule edit {name} --url <base url>`."
             );
         }
         format!(
@@ -115,7 +115,7 @@ pub async fn send(name: &str, cred: &Credential, secret: &str, req: &Request) ->
     if matches!(&cred.auth, Auth::Basic { username } if username.is_empty()) {
         bail!(
             "credential \"{name}\" needs a username. Ask the user for it, then call \
-             update_credential, or have them run `agentkey edit {name} --username <user>`."
+             update_credential, or have them run `keymule edit {name} --username <user>`."
         );
     }
     let mut url = resolve_url(name, cred, &req.path)?;
@@ -124,14 +124,14 @@ pub async fn send(name: &str, cred: &Credential, secret: &str, req: &Request) ->
     }
     for key in req.headers.keys() {
         if is_reserved_header(key, cred) {
-            bail!("header {key} is set by agentkey and cannot be overridden");
+            bail!("header {key} is set by keymule and cannot be overridden");
         }
     }
 
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(60))
-        .user_agent(concat!("agentkey/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("keymule/", env!("CARGO_PKG_VERSION")))
         .build()?;
     let accept = presets::get_or_generic(&cred.service).accept;
 
@@ -289,7 +289,7 @@ fn clip(text: &str, max_bytes: usize, keep_tail: bool) -> (String, bool) {
     (cut.to_string(), true)
 }
 
-/// One line per request in ~/.config/agentkey/audit.log. Best effort.
+/// One line per request in ~/.config/keymule/audit.log. Best effort.
 fn audit(name: &str, method: &str, url: &str, status: u16) {
     let Ok(dir) = config_dir() else { return };
     let _ = std::fs::create_dir_all(&dir);
@@ -346,7 +346,7 @@ mod tests {
         let mut c = cred("https://ci.corp.com");
         c.url.clear();
         let err = resolve_url("bamboo", &c, "/rest").unwrap_err().to_string();
-        assert!(err.contains("agentkey edit bamboo --url"));
+        assert!(err.contains("keymule edit bamboo --url"));
     }
 
     #[test]

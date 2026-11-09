@@ -1,4 +1,4 @@
-//! Native dialogs shown by agentkey itself, so the user can type a secret
+//! Native dialogs shown by keymule itself, so the user can type a secret
 //! or approve a change without it passing through the agent. The text goes
 //! to AppleScript as an argument, never spliced into the script, so names
 //! and URLs chosen by an agent cannot inject AppleScript.
@@ -35,20 +35,20 @@ fn osascript(lines: &[String], message: &str) -> Result<Answer> {
     let err = String::from_utf8_lossy(&out.stderr);
     if err.contains("(-128)") {
         Ok(Answer::Cancelled)
-    } else if err.contains("agentkey-timeout") {
+    } else if err.contains("keymule-timeout") {
         Ok(Answer::TimedOut)
     } else {
         anyhow::bail!("dialog failed: {}", err.trim())
     }
 }
 
-/// Debug builds only: `AGENTKEY_TEST_DIALOG` answers dialogs ("cancel",
-/// "allow", "deny", or the secret to "type"), and `AGENTKEY_TEST_DIALOG_LOG`
+/// Debug builds only: `KEYMULE_TEST_DIALOG` answers dialogs ("cancel",
+/// "allow", "deny", or the secret to "type"), and `KEYMULE_TEST_DIALOG_LOG`
 /// records what each dialog said.
 #[cfg(debug_assertions)]
 fn test_answer(message: &str) -> Option<String> {
-    let answer = std::env::var("AGENTKEY_TEST_DIALOG").ok()?;
-    if let Some(log) = std::env::var_os("AGENTKEY_TEST_DIALOG_LOG") {
+    let answer = std::env::var("KEYMULE_TEST_DIALOG").ok()?;
+    if let Some(log) = std::env::var_os("KEYMULE_TEST_DIALOG_LOG") {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
@@ -92,10 +92,10 @@ fn platform_secret(message: &str) -> Result<Answer> {
         "on run argv".to_string(),
         format!(
             "set r to display dialog (item 1 of argv) default answer \"\" with hidden answer \
-             with title \"agentkey\" buttons {{\"Cancel\", \"Save\"}} default button \"Save\" \
+             with title \"keymule\" buttons {{\"Cancel\", \"Save\"}} default button \"Save\" \
              cancel button \"Cancel\" with icon caution giving up after {TIMEOUT_SECS}"
         ),
-        "if gave up of r then error \"agentkey-timeout\" number 2".to_string(),
+        "if gave up of r then error \"keymule-timeout\" number 2".to_string(),
         "return text returned of r".to_string(),
         "end run".to_string(),
     ];
@@ -111,11 +111,11 @@ fn platform_confirm(message: &str) -> Result<bool> {
     let script = [
         "on run argv".to_string(),
         format!(
-            "set r to display dialog (item 1 of argv) with title \"agentkey\" \
+            "set r to display dialog (item 1 of argv) with title \"keymule\" \
              buttons {{\"Don't Allow\", \"Allow\"}} default button \"Don't Allow\" \
              cancel button \"Don't Allow\" with icon caution giving up after {TIMEOUT_SECS}"
         ),
-        "if gave up of r then error \"agentkey-timeout\" number 2".to_string(),
+        "if gave up of r then error \"keymule-timeout\" number 2".to_string(),
         "return button returned of r".to_string(),
         "end run".to_string(),
     ];
@@ -124,12 +124,10 @@ fn platform_confirm(message: &str) -> Result<bool> {
 
 #[cfg(not(target_os = "macos"))]
 fn platform_secret(_message: &str) -> Result<Answer> {
-    anyhow::bail!("the secure dialog is macOS-only for now; run `agentkey add` in a terminal")
+    anyhow::bail!("the secure dialog is macOS-only for now; run `keymule add` in a terminal")
 }
 
 #[cfg(not(target_os = "macos"))]
 fn platform_confirm(_message: &str) -> Result<bool> {
-    anyhow::bail!(
-        "the confirmation dialog is macOS-only for now; run `agentkey edit` in a terminal"
-    )
+    anyhow::bail!("the confirmation dialog is macOS-only for now; run `keymule edit` in a terminal")
 }

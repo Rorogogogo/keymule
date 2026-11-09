@@ -1,5 +1,5 @@
 //! Credential metadata (never secrets) lives in a TOML file; secret values
-//! live in the OS keychain under the service name "agentkey".
+//! live in the OS keychain under the service name "keymule".
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-pub const KEYCHAIN_SERVICE: &str = "agentkey";
+pub const KEYCHAIN_SERVICE: &str = "keymule";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -60,11 +60,11 @@ pub struct Store {
 }
 
 pub fn config_dir() -> Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("AGENTKEY_HOME") {
+    if let Some(dir) = std::env::var_os("KEYMULE_HOME") {
         return Ok(PathBuf::from(dir));
     }
     let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME is not set"))?;
-    Ok(PathBuf::from(home).join(".config").join("agentkey"))
+    Ok(PathBuf::from(home).join(".config").join("keymule"))
 }
 
 impl Store {
@@ -100,7 +100,7 @@ impl Store {
 
     pub fn get(&self, name: &str) -> Result<&Credential> {
         self.creds.get(name).ok_or_else(|| {
-            anyhow!("no credential named \"{name}\" (run `agentkey list` to see what is stored)")
+            anyhow!("no credential named \"{name}\" (run `keymule list` to see what is stored)")
         })
     }
 
@@ -176,11 +176,11 @@ impl Vault for Keychain {
     }
 }
 
-/// The secret store to use. Debug builds can point `AGENTKEY_TEST_VAULT` at
+/// The secret store to use. Debug builds can point `KEYMULE_TEST_VAULT` at
 /// a JSON file for end-to-end tests; release builds always use the keychain.
 pub fn vault() -> Box<dyn Vault> {
     #[cfg(debug_assertions)]
-    if let Some(path) = std::env::var_os("AGENTKEY_TEST_VAULT") {
+    if let Some(path) = std::env::var_os("KEYMULE_TEST_VAULT") {
         return Box::new(FileVault(PathBuf::from(path)));
     }
     Box::new(Keychain)

@@ -14,24 +14,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentkey"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "keyring",
- "regex",
- "reqwest",
- "rmcp",
- "rpassword",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1292,6 +1274,24 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "keymule"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "keyring",
+ "regex",
+ "reqwest",
+ "rmcp",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

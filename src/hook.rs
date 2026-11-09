@@ -10,7 +10,7 @@ use crate::presets::{self, AuthKind};
 use crate::store::{Auth, Credential, Store, Vault, host_of};
 
 /// Put this anywhere in a prompt to send it as-is.
-pub const IGNORE_MARKER: &str = "#agentkey-ignore";
+pub const IGNORE_MARKER: &str = "#keymule-ignore";
 
 #[derive(Deserialize)]
 struct HookInput {
@@ -36,7 +36,7 @@ pub fn check(prompt: &str, store: &mut Store, vault: &dyn Vault) -> Option<Strin
     }
 
     let mut lines = vec![format!(
-        "agentkey caught {} secret{} in your message and did NOT send it to the model.",
+        "keymule caught {} secret{} in your message and did NOT send it to the model.",
         found.len(),
         if found.len() == 1 { "" } else { "s" }
     )];
@@ -49,7 +49,7 @@ pub fn check(prompt: &str, store: &mut Store, vault: &dyn Vault) -> Option<Strin
                 first_name.get_or_insert(name);
             }
             Err(e) => lines.push(format!(
-                "  ✗ could not save it ({e:#}); run `agentkey add` instead"
+                "  ✗ could not save it ({e:#}); run `keymule add` instead"
             )),
         }
     }
@@ -121,7 +121,7 @@ fn save(found: &detect::Found, store: &mut Store, vault: &dyn Vault) -> Result<(
         String::new()
     } else {
         format!(
-            "\n      finish setup: ask your agent to finish setting up `{name}`, or run: agentkey edit {name} {}",
+            "\n      finish setup: ask your agent to finish setting up `{name}`, or run: keymule edit {name} {}",
             todo.join(" ")
         )
     };
@@ -149,7 +149,7 @@ mod tests {
         assert_eq!(json["decision"], "block");
         let reason = json["reason"].as_str().unwrap();
         assert!(reason.contains("saved as `bamboo`"));
-        assert!(reason.contains("agentkey edit bamboo --url"));
+        assert!(reason.contains("keymule edit bamboo --url"));
         assert!(
             !reason.contains("NjQ3MjE4"),
             "the secret must not be echoed"

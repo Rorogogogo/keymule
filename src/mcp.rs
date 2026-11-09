@@ -18,11 +18,11 @@ use crate::http;
 use crate::presets;
 use crate::store::{self, Auth, Credential, Store, host_of, validate_name};
 
-const INSTRUCTIONS: &str = "agentkey holds the user's API tokens and passwords. \
+const INSTRUCTIONS: &str = "keymule holds the user's API tokens and passwords. \
 Whenever the user asks about a service that needs authentication (Bamboo, GitHub Actions, GitLab, \
 Jenkins, internal APIs...), call list_credentials first and use http_request with the matching \
 credential name. Never ask the user to paste a token, password or API key into the chat. If no \
-matching credential exists, call add_credential: agentkey shows a secure dialog on the user's \
+matching credential exists, call add_credential: keymule shows a secure dialog on the user's \
 screen where they type the secret, and you never see it. Ask the user for the service's base URL \
 first if needed (URLs are not secret). If a token stops working (HTTP 401), offer \
 rotate_credential.";
@@ -148,7 +148,7 @@ async fn add(a: AddArgs) -> anyhow::Result<String> {
         .map_err(|e| anyhow!("{e}. Ask the user for their username and pass it as `username`."))?;
 
     let secret = ask_secret(format!(
-        "Paste your {} token for \"{name}\".\n\nagentkey will only ever send it to:\n\n        {host}\n\n\
+        "Paste your {} token for \"{name}\".\n\nkeymule will only ever send it to:\n\n        {host}\n\n\
          If you don't recognise that host, click Cancel.",
         preset.title
     ))
@@ -342,7 +342,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Call an HTTP API using one of the user's stored credentials. agentkey attaches the secret itself, only for the credential's allowed hosts, and redacts it from the response. You never see the secret."
+        description = "Call an HTTP API using one of the user's stored credentials. keymule attaches the secret itself, only for the credential's allowed hosts, and redacts it from the response. You never see the secret."
     )]
     async fn http_request(
         &self,
@@ -380,7 +380,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Store a new credential. agentkey opens a secure dialog on the user's screen where they type the token; you never see it. It is verified against the service and then locked to the URL's host. Ask the user for the base URL first if the service needs one."
+        description = "Store a new credential. keymule opens a secure dialog on the user's screen where they type the token; you never see it. It is verified against the service and then locked to the URL's host. Ask the user for the base URL first if the service needs one."
     )]
     async fn add_credential(
         &self,
@@ -414,7 +414,7 @@ impl Server {
 impl ServerHandler for Server {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("agentkey", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new("keymule", env!("CARGO_PKG_VERSION")))
             .with_instructions(INSTRUCTIONS)
     }
 }

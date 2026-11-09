@@ -73,7 +73,7 @@ enum Cmd {
     Rm { name: String },
     /// Show the built-in service presets.
     Presets,
-    /// Register agentkey with Claude Code (MCP server, paste hook, CLAUDE.md).
+    /// Register keymule with Claude Code (MCP server, paste hook, CLAUDE.md).
     Init {
         #[arg(long)]
         dry_run: bool,
@@ -96,7 +96,7 @@ enum HookKind {
 #[tokio::main]
 async fn main() {
     if let Err(e) = run(Cli::parse()).await {
-        eprintln!("agentkey: {e:#}");
+        eprintln!("keymule: {e:#}");
         std::process::exit(1);
     }
 }
@@ -163,7 +163,7 @@ async fn add(
         }
     };
     let Some(preset) = presets::find(&service) else {
-        bail!("unknown service \"{service}\" (see `agentkey presets`, or use generic)");
+        bail!("unknown service \"{service}\" (see `keymule presets`, or use generic)");
     };
 
     let name = match name {
@@ -172,7 +172,7 @@ async fn add(
     };
     validate_name(&name)?;
     if store.creds.contains_key(&name) {
-        bail!("\"{name}\" already exists; use `agentkey rotate {name}` to replace its secret");
+        bail!("\"{name}\" already exists; use `keymule rotate {name}` to replace its secret");
     }
 
     let url = match url.or(preset.default_url.map(String::from)) {
@@ -222,12 +222,12 @@ async fn add(
 fn list() -> Result<()> {
     let store = Store::load()?;
     if store.creds.is_empty() {
-        println!("No credentials yet. Try: agentkey add bamboo");
+        println!("No credentials yet. Try: keymule add bamboo");
         return Ok(());
     }
     for (name, c) in &store.creds {
         let url = if c.url.is_empty() {
-            "(no URL: agentkey edit --url)"
+            "(no URL: keymule edit --url)"
         } else {
             &c.url
         };
