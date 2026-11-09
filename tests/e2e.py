@@ -1,7 +1,7 @@
 """End-to-end: fake Bamboo + keymule MCP over stdio + paste hook."""
 import http.server, json, os, subprocess, sys, tempfile, threading
 
-BIN = sys.argv[1]
+BIN = os.path.abspath(sys.argv[1])
 SECRET = "NjQ3MjE4MzQ1Njc4OkxQmPq9Zr2Wd+Hs8"
 seen = []  # (server, path, authorization header)
 
@@ -217,6 +217,35 @@ print("\n--- what the user sees ---\n" + out["reason"] + "\n---")
 h = subprocess.run([BIN, "hook", "prompt"], env=env, text=True, capture_output=True,
                    input=json.dumps({"prompt": "check my bamboo pipeline"}))
 check("clean prompt passes through", h.returncode == 0 and h.stdout == "", h.stdout)
+
+# ---- adopt + exec, against a fake home -------------------------------------
+adopt_home = tempfile.mkdtemp()
+mcp_key = "mk_7Rq2Lx9Vt4Wp8Zn3Kc6Hb1Jd5Fs0Gy"
+server = os.path.join(adopt_home, "server.sh")
+with open(server, "w") as f:
+    f.write('#!/bin/sh\necho "server got key of length ${#MYAPP_API_KEY}"\n')
+os.chmod(server, 0o755)
+with open(os.path.join(adopt_home, ".claude.json"), "w") as f:
+    json.dump({"mcpServers": {"myapp": {"type": "stdio", "command": server, "args": ["--flag"],
+                                        "env": {"MYAPP_API_KEY": mcp_key, "MYAPP_URL": "https://x.dev"}}}}, f, indent=2)
+aenv = dict(env, HOME=adopt_home)
+a = subprocess.run([BIN, "adopt", "--dry-run"], env=aenv, text=True, capture_output=True, cwd=adopt_home)
+check("adopt --dry-run shows the plan, masked, and changes nothing",
+      a.returncode == 0 and "myapp" in a.stdout and mcp_key not in a.stdout
+      and mcp_key in open(os.path.join(adopt_home, ".claude.json")).read(), a.stdout + a.stderr)
+a = subprocess.run([BIN, "adopt"], env=aenv, text=True, capture_output=True, cwd=adopt_home,
+                   stdin=subprocess.DEVNULL, start_new_session=True)
+check("adopt without a terminal or --yes refuses", a.returncode != 0 and "terminal" in a.stderr, a.stderr)
+a = subprocess.run([BIN, "adopt", "--yes"], env=aenv, text=True, capture_output=True, cwd=adopt_home)
+cfg = json.load(open(os.path.join(adopt_home, ".claude.json")))["mcpServers"]["myapp"]
+check("adopt --yes moves the key out of the config",
+      a.returncode == 0 and mcp_key not in json.dumps(cfg) and cfg["args"][:3] == ["exec", "myapp", "--"]
+      and cfg["env"] == {"MYAPP_URL": "https://x.dev"}, a.stdout + a.stderr + json.dumps(cfg))
+r = subprocess.run([cfg["command"]] + cfg["args"], env=aenv, text=True, capture_output=True)
+check("the rewritten entry starts the server with its key",
+      r.stdout.strip() == f"server got key of length {len(mcp_key)}", r.stdout + r.stderr)
+r = subprocess.run([BIN, "exec", "myapp", "--", "env"], env=aenv, text=True, capture_output=True)
+check("exec refuses any other command", r.returncode != 0 and mcp_key not in r.stdout + r.stderr, r.stdout + r.stderr)
 
 print(f"\n{'ALL PASSED' if not fails else f'{fails} FAILED'}")
 sys.exit(1 if fails else 0)

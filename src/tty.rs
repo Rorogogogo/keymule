@@ -49,3 +49,10 @@ pub fn secret(prompt: &str) -> Result<String> {
     }
     Ok(value)
 }
+
+/// A hidden answer, or None if the user just pressed Enter.
+pub fn secret_or_keep(prompt: &str) -> Result<Option<String>> {
+    let value = rpassword::prompt_password(prompt).context("reading secret from the terminal")?;
+    let value = value.trim().to_string();
+    Ok((!value.is_empty()).then_some(value))
+}

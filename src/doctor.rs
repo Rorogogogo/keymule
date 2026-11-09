@@ -360,7 +360,7 @@ fn scan_configs(opts: &Options, collector: &Mutex<Collector>, stats: &mut Stats)
     }
 }
 
-fn is_secret_name(name: &str) -> bool {
+pub fn is_secret_name(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     [
         "TOKEN",
@@ -580,11 +580,19 @@ fn stored_secrets() -> HashMap<String, String> {
         return HashMap::new();
     };
     let vault = store::vault();
-    store
+    let mut out: HashMap<String, String> = store
         .creds
         .keys()
         .filter_map(|name| vault.get(name).ok().map(|s| (s, name.clone())))
-        .collect()
+        .collect();
+    for name in store.servers.keys() {
+        if let Ok(b) = crate::servers::Binding::load(vault.as_ref(), name) {
+            for s in b.secrets() {
+                out.insert(s.clone(), name.clone());
+            }
+        }
+    }
+    out
 }
 
 fn walk(dir: &Path, depth: usize, f: &mut dyn FnMut(&Path)) {
@@ -768,6 +776,17 @@ pub fn render(report: &Report, all: bool) -> String {
         out.push_str(
             "\nNext: revoke each 🔴 token at its service, create a new one, and store it with\n\
              `keymule add <service>` (or `keymule rotate <name>` if it is already stored).\n",
+        );
+    }
+    if report.entries.iter().any(|e| {
+        e.confident
+            && e.locations
+                .iter()
+                .any(|l| l.severity == Severity::Plaintext)
+    }) {
+        out.push_str(
+            "\nNext: `keymule adopt --dry-run` shows how to move MCP server secrets out of\n\
+             agent configs and into the keychain.\n",
         );
     }
     out.push_str("\nNothing left your machine. Secrets are shown masked.\n");

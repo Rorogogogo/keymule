@@ -48,15 +48,38 @@ pub struct Credential {
     pub added_by: String,
 }
 
+/// An MCP server whose secrets keymule holds (see `keymule adopt`). This is
+/// a description for humans; what the secrets may be handed to is sealed in
+/// the keychain item, not here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerMeta {
+    /// Env vars keymule sets (names only).
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// Number of secrets keymule puts into arguments.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub arg_secrets: usize,
+    /// Config entries that run it, e.g. "~/.claude.json · jobjourney".
+    #[serde(default)]
+    pub used_by: Vec<String>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct FileFormat {
     #[serde(default)]
     credentials: BTreeMap<String, Credential>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    servers: BTreeMap<String, ServerMeta>,
 }
 
 pub struct Store {
     path: PathBuf,
     pub creds: BTreeMap<String, Credential>,
+    pub servers: BTreeMap<String, ServerMeta>,
 }
 
 pub fn config_dir() -> Result<PathBuf> {
@@ -73,16 +96,17 @@ impl Store {
     }
 
     pub fn load_from(path: PathBuf) -> Result<Self> {
-        let creds = match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                toml::from_str::<FileFormat>(&text)
-                    .with_context(|| format!("parsing {}", path.display()))?
-                    .credentials
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        let file = match std::fs::read_to_string(&path) {
+            Ok(text) => toml::from_str::<FileFormat>(&text)
+                .with_context(|| format!("parsing {}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileFormat::default(),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
-        Ok(Self { path, creds })
+        Ok(Self {
+            path,
+            creds: file.credentials,
+            servers: file.servers,
+        })
     }
 
     pub fn save(&self) -> Result<()> {
@@ -91,6 +115,7 @@ impl Store {
         }
         let text = toml::to_string_pretty(&FileFormat {
             credentials: self.creds.clone(),
+            servers: self.servers.clone(),
         })?;
         let tmp = self.path.with_extension("toml.tmp");
         std::fs::write(&tmp, text)?;

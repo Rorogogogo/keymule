@@ -1278,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "keymule"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1292,6 +1292,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "toml_edit",
 ]
 
 [[package]]
@@ -2386,6 +2387,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 

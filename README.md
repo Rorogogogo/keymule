@@ -36,6 +36,7 @@ Agent:  Build #482 failed in "Integration tests"…
 - 📒 **Audit log.** Every request is logged to `~/.config/keymule/audit.log` (without secrets).
 - 🧩 **Service presets.** Bamboo, GitHub (incl. Actions), GitLab, Jenkins, or any HTTP API. Presets know the auth scheme, how to verify a token, and give the agent an API cheat-sheet.
 - 🩺 **Leak doctor.** `keymule doctor` finds tokens that already leaked into agent transcripts, sit in plain text in agent configs, or are readable in `.env` files and shell history, so you know what to rotate.
+- 📦 **Adopt MCP secrets.** `keymule adopt` moves the API keys your MCP server configs keep in plain text into the keychain. The servers start the same way, through `keymule exec`.
 
 ---
 
@@ -64,6 +65,35 @@ Desktop configs, `.env` files in the current project and your home folder, and s
 few hundred MB takes a few seconds. Secrets are always masked and nothing leaves your machine.
 `--all` also lists unsure matches, and `--json` gives machine-readable output. Agents can run the
 same scan with the `scan_for_leaks` MCP tool: *"did any of my tokens leak?"*
+
+---
+
+## 📦 Get secrets out of MCP configs
+
+Most MCP servers want their API key in an `env` block of `~/.claude.json`, Cursor's `mcp.json`
+or Codex's `config.toml`, where every agent can read it. `keymule adopt` moves them into the
+keychain (example output, made-up values):
+
+```text
+$ keymule adopt --dry-run
+2 MCP server entries in 2 config files keep secrets in plain text:
+
+  acme   ACME_API_KEY=ak_4…k9P
+      ~/.claude.json · project ~/code/api: acme
+      ~/.codex/config.toml · acme
+
+Each entry will start the same command through keymule, which adds the secrets. For example:
+  before: npx -y acme-mcp
+  after:  ~/.cargo/bin/keymule exec acme -- npx -y acme-mcp
+```
+
+Run it without `--dry-run` to apply (it asks first and backs up each file it rewrites). It handles
+`env` blocks, inline `KEY=value npx …` commands and keys passed as arguments. Non-secret settings
+and `${VAR}` references stay where they are.
+
+The secrets and the exact command lines allowed to receive them are sealed together in one
+keychain item. `keymule exec acme -- env` is refused, and editing the config to point at another
+program doesn't get the key either. `keymule rotate acme` stores a new value.
 
 ---
 
@@ -101,6 +131,8 @@ up to `settings.json.keymule-bak`.
 | `keymule rm <name>` | Delete it (needs terminal confirmation) |
 | `keymule presets` | List service presets |
 | `keymule doctor [--all] [--json] [--dir D]` | Find leaked and plain-text secrets |
+| `keymule adopt [--dry-run] [--yes]` | Move plain-text MCP server secrets into the keychain |
+| `keymule exec <name> -- <command…>` | Start an adopted MCP server with its secrets (used in configs) |
 | `keymule init` | Set up Claude Code |
 | `keymule mcp` | The MCP server (started by your agent) |
 | `keymule hook prompt` | The Claude Code `UserPromptSubmit` hook |
@@ -145,12 +177,15 @@ agent running `security find-generic-password`) triggers a system prompt you hav
 - The secure dialog is macOS-only for now; elsewhere use `keymule add` in a terminal.
 - The agent picks the URL in `add_credential`, so read the host in the dialog before typing your token.
 - Unsigned builds may make macOS ask for keychain access again after each rebuild.
+- `keymule adopt` skips HTTP MCP servers (secret headers), project `.mcp.json` files (usually shared; use `${VAR}` there) and command lines with shell syntax.
+- `keymule exec` stops casual reveals and keeps keys out of files, but an agent that can run arbitrary code as you could still get at a server's environment (for example by changing the server's own code).
 
 ## 🗺 Roadmap
 
-- **0.2**: ✅ `keymule doctor`. Next: `keymule adopt` to move plain-text tokens out of MCP configs into keymule (servers launched through `keymule exec`), more presets
-- **0.3**: database auth proxy, SSH agent, git/docker/AWS credential helpers
-- **0.4**: Touch ID approval for sensitive credentials, short-lived credentials (AWS STS, GitHub App tokens)
+- **0.2**: ✅ `keymule doctor`
+- **0.3**: ✅ `keymule adopt` and `keymule exec`. Next: secret headers for HTTP MCP servers, more presets
+- **0.4**: database auth proxy, SSH agent, git/docker/AWS credential helpers
+- **0.5**: Touch ID approval for sensitive credentials, short-lived credentials (AWS STS, GitHub App tokens)
 
 ## 📄 License
 

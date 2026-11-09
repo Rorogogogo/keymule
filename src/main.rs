@@ -1,3 +1,4 @@
+mod adopt;
 mod detect;
 mod dialog;
 mod doctor;
@@ -6,6 +7,7 @@ mod http;
 mod init;
 mod mcp;
 mod presets;
+mod servers;
 mod store;
 mod tty;
 
@@ -86,6 +88,22 @@ enum Cmd {
         #[arg(long)]
         dir: Option<std::path::PathBuf>,
     },
+    /// Move secrets that MCP server configs keep in plain text into the keychain.
+    Adopt {
+        /// Show what would change without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Don't ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Start an adopted MCP server with its secrets (used in agent configs).
+    Exec {
+        name: String,
+        /// The server's command, exactly as adopted.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     /// Register keymule with Claude Code (MCP server, paste hook, CLAUDE.md).
     Init {
         #[arg(long)]
@@ -165,6 +183,8 @@ async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Adopt { dry_run, yes } => adopt(dry_run, yes),
+        Cmd::Exec { name, command } => servers::exec(store::vault().as_ref(), &name, &command),
         Cmd::Init { dry_run } => init::run(dry_run),
         Cmd::Mcp => mcp::serve().await,
         Cmd::Hook {
@@ -257,9 +277,21 @@ async fn add(
 
 fn list() -> Result<()> {
     let store = Store::load()?;
-    if store.creds.is_empty() {
+    if store.creds.is_empty() && store.servers.is_empty() {
         println!("No credentials yet. Try: keymule add bamboo");
         return Ok(());
+    }
+    for (name, s) in &store.servers {
+        let mut what = s.env.join(", ");
+        if s.arg_secrets > 0 {
+            what = format!("{what} (+{} in arguments)", s.arg_secrets);
+        }
+        println!(
+            "{name:<16} {:<8} {:<40} used by {}",
+            "mcp",
+            what.trim(),
+            s.used_by.len()
+        );
     }
     for (name, c) in &store.creds {
         let url = if c.url.is_empty() {
@@ -316,6 +348,9 @@ fn edit(
 
 async fn rotate(name: &str, no_verify: bool) -> Result<()> {
     let store = Store::load()?;
+    if store.servers.contains_key(name) && !store.creds.contains_key(name) {
+        return rotate_server(name);
+    }
     let cred = store.get(name)?.clone();
     let secret = tty::secret(&format!("New secret for {name} (hidden): "))?;
     if !no_verify && !cred.url.is_empty() {
@@ -345,8 +380,97 @@ async fn test(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn rotate_server(name: &str) -> Result<()> {
+    let vault = store::vault();
+    let mut binding = servers::Binding::load(vault.as_ref(), name)?;
+    let mut changed = 0;
+    for (var, value) in binding.env.iter_mut() {
+        if let Some(new) =
+            tty::secret_or_keep(&format!("New {var} for {name} (hidden, Enter keeps it): "))?
+        {
+            *value = new;
+            changed += 1;
+        }
+    }
+    for (i, value) in binding.args.values_mut().enumerate() {
+        if let Some(new) = tty::secret_or_keep(&format!(
+            "New argument secret #{} for {name} (hidden, Enter keeps it): ",
+            i + 1
+        ))? {
+            *value = new;
+            changed += 1;
+        }
+    }
+    if changed == 0 {
+        println!("Nothing changed.");
+        return Ok(());
+    }
+    binding.save(vault.as_ref(), name)?;
+    println!(
+        "Rotated {changed} secret(s) for \"{name}\". Restart your agent so the server picks them up."
+    );
+    Ok(())
+}
+
+fn adopt(dry_run: bool, yes: bool) -> Result<()> {
+    let opts = adopt::Options {
+        home: home()?,
+        dir: std::env::current_dir()?,
+        exe: std::env::current_exe()?.to_string_lossy().into_owned(),
+    };
+    let vault = store::vault();
+    let mut store = Store::load()?;
+    let plan = adopt::plan(&opts, &store, vault.as_ref())?;
+    print!("{}", plan.render());
+    if plan.targets.is_empty() || dry_run {
+        if dry_run && !plan.targets.is_empty() {
+            println!("\nDry run: nothing changed. Run `keymule adopt` to do it.");
+        }
+        return Ok(());
+    }
+    println!();
+    if !yes {
+        tty::confirm(&format!(
+            "Move these secrets into the keychain and rewrite {}?",
+            plan.files().join(", ")
+        ))?;
+    }
+    // Configs may have changed while you were reading: plan again and make
+    // sure it is still the plan you approved.
+    let fresh = adopt::plan(&opts, &store, vault.as_ref())?;
+    if fresh.fingerprint() != plan.fingerprint() {
+        bail!("the configs changed while waiting for you; run `keymule adopt` again");
+    }
+    let done = adopt::apply(&fresh, &mut store, vault.as_ref(), &opts.home)?;
+    println!(
+        "✓ Moved {} secret(s) into the keychain as {}.",
+        done.secrets,
+        done.bindings.join(", ")
+    );
+    println!("✓ Rewrote {}.", fresh.files().join(", "));
+    println!(
+        "  Backups: {}. They still hold the old secrets: delete them once the servers work.",
+        done.backups.join(", ")
+    );
+    println!("\nRestart Claude Code, Codex, Cursor or Claude Desktop so they pick up the change.");
+    println!(
+        "These secrets sat in plain text, so rotate them when you can: `keymule rotate <name>`."
+    );
+    Ok(())
+}
+
 fn rm(name: &str) -> Result<()> {
     let mut store = Store::load()?;
+    if store.servers.contains_key(name) && !store.creds.contains_key(name) {
+        tty::confirm(&format!(
+            "Delete MCP server \"{name}\" and its secrets? Configs that run `keymule exec {name}` will stop working."
+        ))?;
+        servers::Binding::delete(store::vault().as_ref(), name)?;
+        store.servers.remove(name);
+        store.save()?;
+        println!("Deleted \"{name}\".");
+        return Ok(());
+    }
     store.get(name)?;
     tty::confirm(&format!("Delete \"{name}\" and its secret?"))?;
     store::vault().delete(name)?;
