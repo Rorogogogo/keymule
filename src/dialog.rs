@@ -9,9 +9,12 @@ use anyhow::Result;
 pub enum Answer {
     Text(String),
     Cancelled,
+    /// Only the macOS dialog can time out.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     TimedOut,
 }
 
+#[cfg(target_os = "macos")]
 const TIMEOUT_SECS: u32 = 180;
 
 #[cfg(target_os = "macos")]
