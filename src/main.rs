@@ -1,4 +1,5 @@
 mod detect;
+mod dialog;
 mod hook;
 mod http;
 mod init;
@@ -181,20 +182,11 @@ async fn add(
     let url = url.trim_end_matches('/').to_string();
     let host = host_of(&url)?;
 
-    let auth = match (header, preset.auth) {
-        (Some(h), _) => Auth::Header { name: h },
-        (None, AuthKind::Header(h)) => Auth::Header { name: h.into() },
-        (None, AuthKind::Basic) => Auth::Basic {
-            username: match username {
-                Some(u) => u,
-                None => tty::ask("Username: ")?,
-            },
-        },
-        (None, AuthKind::Bearer) => match username {
-            Some(u) => Auth::Basic { username: u },
-            None => Auth::Bearer,
-        },
+    let username = match (username, preset.auth, &header) {
+        (None, AuthKind::Basic, None) => Some(tty::ask("Username: ")?),
+        (u, _, _) => u,
     };
+    let auth = presets::auth_for(preset, header, username)?;
 
     let secret = tty::secret(&format!("{} token/password (hidden): ", preset.title))?;
     let cred = Credential {

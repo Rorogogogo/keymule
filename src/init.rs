@@ -11,7 +11,7 @@ const MD_START: &str = "<!-- agentkey:start -->";
 const MD_END: &str = "<!-- agentkey:end -->";
 const MD_BLOCK: &str = "## Credentials (agentkey)
 - API tokens and passwords are stored in agentkey. Use the `agentkey` MCP tools (`list_credentials`, then `http_request`) for any service that needs auth, e.g. Bamboo, GitHub Actions, GitLab, Jenkins.
-- Never ask me to paste a token, password or API key into the chat. If a credential is missing, ask me to run `agentkey add <service>` in my terminal.
+- Never ask me to paste a token, password or API key into the chat. If a credential is missing, call `add_credential`: it opens a secure dialog where I type the secret. Ask me for the base URL first if the service needs one.
 - Never try to read secrets from the keychain, `security`, or agentkey's files.";
 
 fn home() -> Result<PathBuf> {
@@ -151,8 +151,18 @@ pub fn install_hook(path: &Path, command: &str, dry_run: bool) -> Result<bool> {
 
 pub fn install_md(path: &Path, dry_run: bool) -> Result<bool> {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
-    if existing.contains(MD_START) {
-        return Ok(false);
+    if let (Some(start), Some(end)) = (existing.find(MD_START), existing.find(MD_END)) {
+        // Already there: refresh it if this version's text differs.
+        let wanted = format!("{MD_START}\n{MD_BLOCK}\n{MD_END}");
+        let end = end + MD_END.len();
+        if start > end || existing[start..end] == wanted {
+            return Ok(false);
+        }
+        if !dry_run {
+            let updated = format!("{}{wanted}{}", &existing[..start], &existing[end..]);
+            std::fs::write(path, updated)?;
+        }
+        return Ok(true);
     }
     if !dry_run {
         if let Some(dir) = path.parent() {
@@ -203,6 +213,22 @@ mod tests {
         assert!(!install_md(&p, false).unwrap());
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.starts_with("# mine\n\n<!-- agentkey:start -->"));
+    }
+
+    #[test]
+    fn outdated_md_block_is_replaced_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("CLAUDE.md");
+        std::fs::write(
+            &p,
+            format!("# mine\n\n{MD_START}\nold text\n{MD_END}\n\n# after\n"),
+        )
+        .unwrap();
+        assert!(install_md(&p, false).unwrap());
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("old text") && text.contains("add_credential"));
+        assert!(text.starts_with("# mine\n\n") && text.ends_with("\n\n# after\n"));
+        assert!(!install_md(&p, false).unwrap());
     }
 
     #[test]

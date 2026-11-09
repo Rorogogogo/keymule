@@ -71,8 +71,9 @@ pub fn resolve_url(name: &str, cred: &Credential, path: &str) -> Result<Url> {
     } else {
         if cred.url.is_empty() {
             bail!(
-                "credential \"{name}\" has no base URL yet. Ask the user to run \
-                 `agentkey edit {name} --url <base url>` in their terminal."
+                "credential \"{name}\" has no base URL yet. Ask the user for it, then call \
+                 update_credential (they approve the host in a dialog), or have them run \
+                 `agentkey edit {name} --url <base url>`."
             );
         }
         format!(
@@ -113,8 +114,8 @@ pub async fn send(name: &str, cred: &Credential, secret: &str, req: &Request) ->
         .with_context(|| format!("invalid HTTP method: {}", req.method))?;
     if matches!(&cred.auth, Auth::Basic { username } if username.is_empty()) {
         bail!(
-            "credential \"{name}\" needs a username. Ask the user to run \
-             `agentkey edit {name} --username <user>` in their terminal."
+            "credential \"{name}\" needs a username. Ask the user for it, then call \
+             update_credential, or have them run `agentkey edit {name} --username <user>`."
         );
     }
     let mut url = resolve_url(name, cred, &req.path)?;

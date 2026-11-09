@@ -1,6 +1,8 @@
 //! Known services: where their API lives, how they authenticate, how to
 //! verify a token, and a short API cheat-sheet handed to the agent.
 
+use crate::store::Auth;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthKind {
     Bearer,
@@ -101,6 +103,22 @@ pub const PRESETS: &[Preset] = &[
         hint: "",
     },
 ];
+
+/// How a new credential for `preset` authenticates. `header` overrides the
+/// preset; a username switches bearer services to basic auth.
+pub fn auth_for(
+    preset: &Preset,
+    header: Option<String>,
+    username: Option<String>,
+) -> anyhow::Result<Auth> {
+    Ok(match (header, preset.auth, username) {
+        (Some(h), _, _) => Auth::Header { name: h },
+        (None, AuthKind::Header(h), _) => Auth::Header { name: h.into() },
+        (None, AuthKind::Basic | AuthKind::Bearer, Some(u)) => Auth::Basic { username: u },
+        (None, AuthKind::Basic, None) => anyhow::bail!("{} needs a username", preset.title),
+        (None, AuthKind::Bearer, None) => Auth::Bearer,
+    })
+}
 
 pub fn find(id: &str) -> Option<&'static Preset> {
     PRESETS.iter().find(|p| p.id == id)

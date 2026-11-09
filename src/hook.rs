@@ -121,7 +121,7 @@ fn save(found: &detect::Found, store: &mut Store, vault: &dyn Vault) -> Result<(
         String::new()
     } else {
         format!(
-            "\n      finish setup: agentkey edit {name} {}",
+            "\n      finish setup: ask your agent to finish setting up `{name}`, or run: agentkey edit {name} {}",
             todo.join(" ")
         )
     };

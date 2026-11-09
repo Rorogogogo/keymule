@@ -40,10 +40,17 @@ Agent:  Build #482 failed in "Integration tests"…
 ```sh
 cargo install --path .        # crates.io release coming
 agentkey init                 # registers the MCP server, paste hook and CLAUDE.md note
-agentkey add bamboo           # asks for URL + token (hidden), verifies it, stores it
 ```
 
-Restart Claude Code and ask: *"check my bamboo pipeline"*.
+Restart Claude Code, then just ask:
+
+> *connect my bamboo, it's at https://bamboo.yourcompany.com*
+
+The agent calls `add_credential` and a macOS dialog pops up showing the host the token will be
+locked to. You type the token there. It goes straight to the keychain, is verified against Bamboo,
+and the agent only gets back "saved, verified as you". Then: *"check my bamboo pipeline"*.
+
+Prefer the terminal? `agentkey add bamboo` does the same with a hidden prompt.
 
 `agentkey init --dry-run` shows what it would change first. Your `~/.claude/settings.json` is backed
 up to `settings.json.agentkey-bak`.
@@ -71,6 +78,11 @@ up to `settings.json.agentkey-bak`.
 |---|---|
 | `list_credentials` | Names, service, base URL, allowed hosts, API hints. No secrets |
 | `http_request` | `credential`, `method`, `path`, `query`, `headers`, `body`, `max_bytes`, `keep_tail` |
+| `add_credential` | Opens a secure dialog for the user to type the secret; verifies and stores it |
+| `rotate_credential` | Same dialog, for a new token on an existing credential |
+| `update_credential` | Change URL, username or description; a new host needs the user's approval in a dialog |
+
+The secret never travels through the MCP connection. There is no tool that takes or returns one.
 
 ### Other agents
 
@@ -96,6 +108,8 @@ agent running `security find-generic-password`) triggers a system prompt you hav
 
 - Paste detection is reliable for prefixed tokens (`ghp_`, `github_pat_`, `glpat-`, `sk-`, `AKIA`…). Unprefixed tokens such as Bamboo's are caught when the message gives context ("my bamboo token is …").
 - HTTP APIs only. Database, SSH and cloud CLI credentials are on the roadmap.
+- The secure dialog is macOS-only for now; elsewhere use `agentkey add` in a terminal.
+- The agent picks the URL in `add_credential`, so read the host in the dialog before typing your token.
 - Unsigned builds may make macOS ask for keychain access again after each rebuild.
 
 ## 🗺 Roadmap

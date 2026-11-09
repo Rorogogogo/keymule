@@ -67,9 +67,23 @@ with open(vault, "w") as f:
 env = dict(os.environ, AGENTKEY_HOME=home, AGENTKEY_TEST_VAULT=vault)
 
 # ---- MCP over stdio -------------------------------------------------------
-p = subprocess.Popen([BIN, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                     env=env, text=True)
+p = None
 nid = 0
+
+
+def session(**extra):
+    """Start a fresh MCP server (dialog answers are fixed per process)."""
+    global p, nid
+    if p:
+        p.stdin.close()
+        p.wait(timeout=5)
+    p = subprocess.Popen([BIN, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         env=dict(env, **extra), text=True)
+    nid = 0
+    r = rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                           "clientInfo": {"name": "e2e", "version": "0"}})
+    rpc("notifications/initialized", notify=True)
+    return r
 
 
 def rpc(method, params=None, notify=False):
@@ -95,9 +109,7 @@ def call(name, args):
     return r.get("isError", False), r["content"][0]["text"]
 
 
-init = rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
-                          "clientInfo": {"name": "e2e", "version": "0"}})
-rpc("notifications/initialized", notify=True)
+init = session()
 print("server:", init["result"]["serverInfo"], "| instructions:",
       bool(init["result"].get("instructions")))
 print("tools:", [t["name"] for t in rpc("tools/list")["result"]["tools"]])
@@ -136,6 +148,45 @@ check("other host saw no Authorization header",
 
 err, out = call("http_request", {"credential": "nope", "path": "/"})
 check("unknown credential gives a helpful error", err and "agentkey list" in out, out)
+
+# ---- adding / rotating / updating through MCP (dialog answered by env) ----
+dlog = os.path.join(home, "dialogs.log")
+vault_now = lambda: json.load(open(vault))
+fake = f"http://127.0.0.1:{port_a}"
+
+session(AGENTKEY_TEST_DIALOG=SECRET, AGENTKEY_TEST_DIALOG_LOG=dlog)
+err, out = call("add_credential", {"service": "bamboo", "name": "ci", "url": fake})
+check("add_credential saves a verified token typed in the dialog",
+      not err and "verified as roro" in out and vault_now().get("ci") == SECRET, out)
+check("add_credential result never contains the secret", SECRET not in out, out)
+check("dialog showed the host the token is locked to", f"127.0.0.1:{port_a}" in open(dlog).read())
+err, out = call("add_credential", {"service": "bamboo", "name": "ci", "url": fake})
+check("add_credential refuses to overwrite", err and "already exists" in out, out)
+err, out = call("add_credential", {"service": "bamboo", "name": "nourl"})
+check("add_credential asks for a URL when the preset has none", err and "needs a base URL" in out, out)
+err, out = call("rotate_credential", {"name": "ci"})
+check("rotate_credential verifies and saves", not err and "Rotated" in out, out)
+
+session(AGENTKEY_TEST_DIALOG="wrong-token-123456")
+err, out = call("add_credential", {"service": "bamboo", "name": "bad", "url": fake})
+check("wrong token is rejected and NOT saved",
+      err and "NOT saved" in out and "bad" not in vault_now(), out)
+
+session(AGENTKEY_TEST_DIALOG="cancel")
+err, out = call("add_credential", {"service": "github", "name": "gh2"})
+check("cancelling the dialog saves nothing", err and "cancelled" in out and "gh2" not in vault_now(), out)
+
+with open(os.path.join(home, "credentials.toml"), "a") as f:
+    f.write('\n[credentials.pasted]\nservice = "bamboo"\nauth = { type = "bearer" }\n')
+err, out = call("list_credentials", {})
+check("half-set-up credential tells the agent what to do", "update_credential" in out, out)
+session(AGENTKEY_TEST_DIALOG="deny")
+err, out = call("update_credential", {"name": "pasted", "url": "https://evil.example"})
+check("new host denied in dialog leaves credential unchanged",
+      err and "did not allow" in out and "evil" not in open(os.path.join(home, "credentials.toml")).read(), out)
+session(AGENTKEY_TEST_DIALOG="allow")
+err, out = call("update_credential", {"name": "pasted", "url": fake})
+check("new host allowed in dialog is saved", not err and "Updated" in out, out)
 p.stdin.close()
 p.wait(timeout=5)
 
