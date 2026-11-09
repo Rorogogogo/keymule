@@ -60,6 +60,16 @@ pub struct RotateArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ScanArgs {
+    /// Also list unsure matches (secrets without a known format).
+    #[serde(default)]
+    pub all: Option<bool>,
+    /// Project directory to check for .env and .mcp.json files (default: the server's working directory).
+    #[serde(default)]
+    pub dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct UpdateArgs {
     /// Credential name from list_credentials.
     pub name: String,
@@ -407,6 +417,34 @@ impl Server {
         Parameters(args): Parameters<UpdateArgs>,
     ) -> Result<CallToolResult, McpError> {
         Ok(done(update(args).await))
+    }
+
+    #[tool(
+        description = "Scan this machine for secrets that leaked to AI models (agent transcripts), sit in plain text in agent configs, or are readable in .env files and shell history. Results are masked; you never see a full secret. Takes a few seconds."
+    )]
+    async fn scan_for_leaks(
+        &self,
+        Parameters(args): Parameters<ScanArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            let home = std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| anyhow!("HOME is not set"))?;
+            let dir = match args.dir {
+                Some(d) => std::path::PathBuf::from(d),
+                None => std::env::current_dir()?,
+            };
+            let report = crate::doctor::run(&crate::doctor::Options {
+                home,
+                dir,
+                check_stored: true,
+            });
+            Ok(crate::doctor::render(&report, args.all.unwrap_or(false)))
+        })
+        .await
+        .map_err(|e| anyhow!(e.to_string()))
+        .and_then(|r| r);
+        Ok(done(result))
     }
 }
 

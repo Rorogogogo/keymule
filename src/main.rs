@@ -1,5 +1,6 @@
 mod detect;
 mod dialog;
+mod doctor;
 mod hook;
 mod http;
 mod init;
@@ -73,6 +74,18 @@ enum Cmd {
     Rm { name: String },
     /// Show the built-in service presets.
     Presets,
+    /// Find secrets that leaked to AI models or sit in plain text where agents can read them.
+    Doctor {
+        /// Also list unsure matches (secrets without a known format).
+        #[arg(long)]
+        all: bool,
+        /// Machine-readable output (secrets are still masked).
+        #[arg(long)]
+        json: bool,
+        /// Project directory to check for .env and .mcp.json files (default: current directory).
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+    },
     /// Register keymule with Claude Code (MCP server, paste hook, CLAUDE.md).
     Init {
         #[arg(long)]
@@ -91,6 +104,12 @@ enum Cmd {
 enum HookKind {
     /// Claude Code UserPromptSubmit: save pasted secrets and block the prompt.
     Prompt,
+}
+
+fn home() -> Result<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set"))
 }
 
 #[tokio::main]
@@ -126,6 +145,23 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Presets => {
             for p in PRESETS {
                 println!("{:<8} {}  ({})", p.id, p.title, p.url_example);
+            }
+            Ok(())
+        }
+        Cmd::Doctor { all, json, dir } => {
+            let opts = doctor::Options {
+                home: home()?,
+                dir: match dir {
+                    Some(d) => d,
+                    None => std::env::current_dir()?,
+                },
+                check_stored: true,
+            };
+            let report = doctor::run(&opts);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", doctor::render(&report, all));
             }
             Ok(())
         }

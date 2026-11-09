@@ -187,6 +187,17 @@ check("new host denied in dialog leaves credential unchanged",
 session(KEYMULE_TEST_DIALOG="allow")
 err, out = call("update_credential", {"name": "pasted", "url": fake})
 check("new host allowed in dialog is saved", not err and "Updated" in out, out)
+
+# ---- doctor via MCP, against a fake home ----------------------------------
+fake_home = tempfile.mkdtemp()
+leak = "ghp_Q8mZ2vK7xR4tW9pN3bY6cJ1hL5dF0gS2aE7u"
+os.makedirs(os.path.join(fake_home, ".claude", "projects", "-x-app"))
+with open(os.path.join(fake_home, ".claude", "projects", "-x-app", "s.jsonl"), "w") as f:
+    f.write(json.dumps({"message": f"use {leak}"}) + "\n")
+session(HOME=fake_home)
+err, out = call("scan_for_leaks", {"dir": fake_home})
+check("scan_for_leaks reports the leaked token masked",
+      not err and "Sent to an AI model" in out and "ghp_…E7u" in out and leak not in out, out)
 p.stdin.close()
 p.wait(timeout=5)
 

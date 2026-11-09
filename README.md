@@ -71,6 +71,7 @@ up to `settings.json.keymule-bak`.
 | `keymule test <name>` | Check the credential still works |
 | `keymule rm <name>` | Delete it (needs terminal confirmation) |
 | `keymule presets` | List service presets |
+| `keymule doctor [--all] [--json] [--dir D]` | Find leaked and plain-text secrets |
 | `keymule init` | Set up Claude Code |
 | `keymule mcp` | The MCP server (started by your agent) |
 | `keymule hook prompt` | The Claude Code `UserPromptSubmit` hook |
@@ -107,7 +108,7 @@ agent running `security find-generic-password`) triggers a system prompt you hav
 
 ---
 
-## ⚠️ Limits (v0.1)
+## ⚠️ Limits
 
 - Paste detection is reliable for prefixed tokens (`ghp_`, `github_pat_`, `glpat-`, `sk-`, `AKIA`…). Unprefixed tokens such as Bamboo's are caught when the message gives context ("my bamboo token is …").
 - HTTP APIs only. Database, SSH and cloud CLI credentials are on the roadmap.
@@ -117,7 +118,7 @@ agent running `security find-generic-password`) triggers a system prompt you hav
 
 ## 🗺 Roadmap
 
-- **0.2**: `keymule doctor` (find leaked secrets in MCP configs, `.env` files and agent transcripts), move plain-text tokens in MCP configs into keymule, more presets
+- **0.2**: ✅ `keymule doctor`. Next: `keymule adopt` to move plain-text tokens out of MCP configs into keymule (servers launched through `keymule exec`), more presets
 - **0.3**: database auth proxy, SSH agent, git/docker/AWS credential helpers
 - **0.4**: Touch ID approval for sensitive credentials, short-lived credentials (AWS STS, GitHub App tokens)
 
