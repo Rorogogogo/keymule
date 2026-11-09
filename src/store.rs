@@ -59,7 +59,7 @@ pub struct ServerMeta {
     /// Number of secrets keymule puts into arguments.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub arg_secrets: usize,
-    /// Config entries that run it, e.g. "~/.claude.json · jobjourney".
+    /// Config entries that run it, e.g. "~/.claude.json · acme".
     #[serde(default)]
     pub used_by: Vec<String>,
 }
