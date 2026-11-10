@@ -106,6 +106,10 @@ enum Cmd {
         /// Don't ask for confirmation.
         #[arg(long)]
         yes: bool,
+        /// Also adopt this MCP server even if its secrets look like defaults,
+        /// e.g. a local database password (repeatable).
+        #[arg(long = "server", value_name = "NAME")]
+        servers: Vec<String>,
     },
     /// Start an adopted MCP server with its secrets (used in agent configs).
     Exec {
@@ -222,7 +226,11 @@ async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Adopt { dry_run, yes } => adopt(dry_run, yes),
+        Cmd::Adopt {
+            dry_run,
+            yes,
+            servers,
+        } => adopt(dry_run, yes, servers),
         Cmd::Exec { name, command } => servers::exec(store::vault().as_ref(), &name, &command),
         Cmd::Init { dry_run } => init::run(dry_run),
         Cmd::Mcp => mcp::serve().await,
@@ -540,8 +548,9 @@ fn rotate_server(name: &str, dialog: bool) -> Result<()> {
     Ok(())
 }
 
-fn adopt(dry_run: bool, yes: bool) -> Result<()> {
+fn adopt(dry_run: bool, yes: bool, force: Vec<String>) -> Result<()> {
     let opts = adopt::Options {
+        force,
         home: home()?,
         dir: std::env::current_dir()?,
         exe: std::env::current_exe()?.to_string_lossy().into_owned(),

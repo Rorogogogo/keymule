@@ -89,7 +89,8 @@ Each entry will start the same command through keymule, which adds the secrets. 
 
 Run it without `--dry-run` to apply (it asks first and backs up each file it rewrites). It handles
 `env` blocks, inline `KEY=value npx …` commands and keys passed as arguments. Non-secret settings
-and `${VAR}` references stay where they are.
+and `${VAR}` references stay where they are. Default-looking passwords (a local database's
+`postgres`, say) are skipped unless you name the server: `keymule adopt --server my-db`.
 
 The secrets and the exact command lines allowed to receive them are sealed together in one
 keychain item. `keymule exec acme -- env` is refused, and editing the config to point at another
@@ -131,7 +132,7 @@ up to `settings.json.keymule-bak`.
 | `keymule rm <name>` | Delete it (needs terminal confirmation) |
 | `keymule presets` | List service presets |
 | `keymule doctor [--all] [--json] [--dir D]` | Find leaked and plain-text secrets |
-| `keymule adopt [--dry-run] [--yes]` | Move plain-text MCP server secrets into the keychain |
+| `keymule adopt [--dry-run] [--yes] [--server NAME]` | Move plain-text MCP server secrets into the keychain |
 | `keymule exec <name> -- <command…>` | Start an adopted MCP server with its secrets (used in configs) |
 | `keymule init` | Set up Claude Code |
 | `keymule mcp` | The MCP server (started by your agent) |

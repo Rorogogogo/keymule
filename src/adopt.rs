@@ -19,6 +19,9 @@ pub struct Options {
     pub dir: PathBuf,
     /// Path of the keymule binary to put into configs.
     pub exe: String,
+    /// Servers to adopt even when their secrets look like defaults (a local
+    /// database's `postgres` password, say).
+    pub force: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +172,17 @@ fn is_secret(key: &str, value: &str) -> bool {
         || !detect::scan_deep(value).is_empty()
 }
 
+/// A URL with a password in it, e.g. postgres://user:pass@host/db.
+static CRED_URL: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"://[^/\s:@]+:[^@\s]+@").unwrap());
+
+/// For a server the user named with `--server`: anything secret-named or a
+/// URL with a password, however default it looks. `${VAR}` references stay.
+fn is_forced_secret(key: &str, value: &str) -> bool {
+    let v = value.trim();
+    !v.is_empty() && !v.contains("${") && (is_secret_name(key) || CRED_URL.is_match(v))
+}
+
 enum Analysis {
     Nothing,
     Skip(&'static str),
@@ -178,7 +192,8 @@ enum Analysis {
 /// Characters that make a command line more than "VAR=x program args".
 const SHELL_CHARS: &[char] = &['\'', '"', '$', '`', '\\', '|', ';', '&', '<', '>', '(', ')'];
 
-fn analyze(server: &Value) -> Analysis {
+fn analyze(server: &Value, force: bool) -> Analysis {
+    let is_secret = |k: &str, v: &str| is_secret(k, v) || (force && is_forced_secret(k, v));
     let Some(obj) = server.as_object() else {
         return Analysis::Nothing;
     };
@@ -378,7 +393,9 @@ pub fn plan(opts: &Options, store: &Store, vault: &dyn Vault) -> Result<Plan> {
                 continue;
             };
             let place = format!("{} · {label}", config.display);
-            match analyze(server) {
+            let server_name = keys.last().map(String::as_str).unwrap_or("");
+            let force = opts.force.iter().any(|f| f == server_name);
+            match analyze(server, force) {
                 Analysis::Nothing => {}
                 Analysis::Skip(reason) => skipped.push(Skipped { place, reason }),
                 Analysis::Adopt(_) if project_file => skipped.push(Skipped {
@@ -392,6 +409,17 @@ pub fn plan(opts: &Options, store: &Store, vault: &dyn Vault) -> Result<Plan> {
                     targets.push(*t);
                 }
             }
+        }
+    }
+
+    for name in &opts.force {
+        let known = configs.iter().any(|c| {
+            servers_in(&c.value)
+                .iter()
+                .any(|(k, _)| k.last() == Some(name))
+        });
+        if !known {
+            bail!("no MCP server named \"{name}\" in your agent configs");
         }
     }
 
@@ -469,11 +497,16 @@ impl Plan {
             let files: std::collections::BTreeSet<usize> =
                 self.targets.iter().map(|t| t.config).collect();
             out.push_str(&format!(
-                "{} MCP server entr{} in {} config file{} keep secrets in plain text:\n",
+                "{} MCP server entr{} in {} config file{} {} secrets in plain text:\n",
                 self.targets.len(),
                 if self.targets.len() == 1 { "y" } else { "ies" },
                 files.len(),
                 if files.len() == 1 { "" } else { "s" },
+                if self.targets.len() == 1 {
+                    "keeps"
+                } else {
+                    "keep"
+                },
             ));
             let mut by_binding: BTreeMap<&str, Vec<&Target>> = BTreeMap::new();
             for t in &self.targets {
@@ -719,6 +752,7 @@ mod tests {
             dir: home.join("project"),
             home,
             exe: "/bin/keymule".into(),
+            force: Vec::new(),
         };
         (dir, opts)
     }
@@ -828,8 +862,21 @@ mod tests {
         assert_eq!(binding_name("@magicuidesign/mcp"), "magicuidesign-mcp");
         assert_eq!(binding_name("pg-mcp-local"), "pg-mcp-local");
         let server = serde_json::json!({"command": format!("TOKEN='{KEY}' npx x"), "args": []});
-        assert!(matches!(analyze(&server), Analysis::Skip(_)));
+        assert!(matches!(analyze(&server, false), Analysis::Skip(_)));
         let reference = serde_json::json!({"command": "npx", "env": {"API_KEY": "${API_KEY}"}});
-        assert!(matches!(analyze(&reference), Analysis::Nothing));
+        assert!(matches!(analyze(&reference, false), Analysis::Nothing));
+        assert!(matches!(analyze(&reference, true), Analysis::Nothing));
+
+        // A local database with a default password is left alone unless named.
+        let local = serde_json::json!({"command": "postgres-mcp",
+            "env": {"DATABASE_URI": "postgres://postgres:postgres@127.0.0.1:5432/app", "MODE": "ro"}});
+        assert!(matches!(analyze(&local, false), Analysis::Nothing));
+        match analyze(&local, true) {
+            Analysis::Adopt(t) => {
+                assert_eq!(t.secret_env.keys().collect::<Vec<_>>(), ["DATABASE_URI"]);
+                assert_eq!(t.keep_env.get("MODE").and_then(Value::as_str), Some("ro"));
+            }
+            _ => panic!("named server should be adopted"),
+        }
     }
 }
