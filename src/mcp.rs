@@ -16,7 +16,7 @@ use anyhow::{anyhow, bail};
 use crate::dialog::{self, Answer};
 use crate::http;
 use crate::presets;
-use crate::store::{self, Auth, Credential, Store, host_of, validate_name};
+use crate::store::{self, Auth, Credential, Sealed, Store, host_of, validate_name};
 
 const INSTRUCTIONS: &str = "keymule holds the user's API tokens and passwords. \
 Whenever the user asks about a service that needs authentication (Bamboo, GitHub Actions, GitLab, \
@@ -178,7 +178,7 @@ async fn add(a: AddArgs) -> anyhow::Result<String> {
     if store.creds.contains_key(&name) {
         bail!("\"{name}\" was created by something else meanwhile. Nothing was saved.");
     }
-    store::vault().set(&name, &secret)?;
+    Sealed::new(secret, &cred).save(store::vault().as_ref(), &name)?;
     store.creds.insert(name.clone(), cred);
     store.save()?;
     Ok(format!(
@@ -187,8 +187,20 @@ async fn add(a: AddArgs) -> anyhow::Result<String> {
     ))
 }
 
+/// The sealed credential. The keychain may show a macOS approval dialog, so
+/// this runs off the async runtime.
+async fn load_sealed(name: &str) -> anyhow::Result<Sealed> {
+    let name = name.to_string();
+    tokio::task::spawn_blocking(move || {
+        let store = Store::load()?;
+        Sealed::load(store::vault().as_ref(), &name, store.get(&name)?)
+    })
+    .await?
+}
+
 async fn rotate(a: RotateArgs) -> anyhow::Result<String> {
-    let cred = Store::load()?.get(&a.name)?.clone();
+    let mut sealed = load_sealed(&a.name).await?;
+    let cred = sealed.apply(Store::load()?.get(&a.name)?);
     let title = presets::get_or_generic(&cred.service).title;
     let hosts = if cred.hosts.is_empty() {
         "(no host set yet)".to_string()
@@ -201,7 +213,8 @@ async fn rotate(a: RotateArgs) -> anyhow::Result<String> {
     ))
     .await?;
     let note = check(&a.name, &cred, &secret, a.verify.unwrap_or(true)).await?;
-    store::vault().set(&a.name, &secret)?;
+    sealed.secret = secret;
+    sealed.save(store::vault().as_ref(), &a.name)?;
     Ok(format!(
         "Rotated \"{}\"{note}. Remind the user to revoke the old token at the service.",
         a.name
@@ -209,7 +222,9 @@ async fn rotate(a: RotateArgs) -> anyhow::Result<String> {
 }
 
 async fn update(a: UpdateArgs) -> anyhow::Result<String> {
-    let mut cred = Store::load()?.get(&a.name)?.clone();
+    let mut sealed = load_sealed(&a.name).await?;
+    // Check new hosts against the sealed rules, not the editable file.
+    let mut cred = sealed.apply(Store::load()?.get(&a.name)?);
     let mut changed = Vec::new();
     if let Some(url) = a.url {
         let url = url.trim_end_matches('/').to_string();
@@ -250,6 +265,9 @@ async fn update(a: UpdateArgs) -> anyhow::Result<String> {
     }
     let mut store = Store::load()?;
     store.get(&a.name)?;
+    sealed.hosts = cred.hosts.clone();
+    sealed.auth = cred.auth.clone();
+    sealed.save(store::vault().as_ref(), &a.name)?;
     store.creds.insert(a.name.clone(), cred);
     store.save()?;
     Ok(format!("Updated \"{}\": {}.", a.name, changed.join(", ")))
@@ -366,14 +384,14 @@ impl Server {
             Ok(c) => c.clone(),
             Err(e) => return Ok(tool_error(format!("{e:#}"))),
         };
-        let name = args.credential.clone();
-        // The keychain may show a macOS approval dialog; keep it off the async runtime.
-        let secret =
-            match tokio::task::spawn_blocking(move || crate::store::vault().get(&name)).await {
-                Ok(Ok(s)) => s,
-                Ok(Err(e)) => return Ok(tool_error(format!("{e:#}"))),
-                Err(e) => return Ok(tool_error(e.to_string())),
-            };
+        let sealed = match load_sealed(&args.credential).await {
+            Ok(s) => s,
+            Err(e) => return Ok(tool_error(format!("{e:#}"))),
+        };
+        // Hosts and auth come from the keychain item, so an edited
+        // credentials.toml can't send the secret anywhere new.
+        let cred = sealed.apply(&cred);
+        let secret = sealed.secret;
         let req = http::Request {
             method: args.method.unwrap_or_else(|| "GET".into()),
             path: args.path,

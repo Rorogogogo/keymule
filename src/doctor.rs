@@ -583,7 +583,9 @@ fn stored_secrets() -> HashMap<String, String> {
     let mut out: HashMap<String, String> = store
         .creds
         .keys()
-        .filter_map(|name| vault.get(name).ok().map(|s| (s, name.clone())))
+        .filter_map(|name| {
+            store::Sealed::peek_secret(vault.as_ref(), name).map(|s| (s, name.clone()))
+        })
         .collect();
     for name in store.servers.keys() {
         if let Ok(b) = crate::servers::Binding::load(vault.as_ref(), name) {

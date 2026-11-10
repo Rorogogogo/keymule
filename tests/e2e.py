@@ -117,6 +117,10 @@ print("tools:", [t["name"] for t in rpc("tools/list")["result"]["tools"]])
 fails = 0
 
 
+SEAL = "keymule-sealed-v1:"
+def secret_of(raw):
+    return json.loads(raw[len(SEAL):])["secret"] if raw and raw.startswith(SEAL) else raw
+
 def check(label, ok, detail=""):
     global fails
     fails += not ok
@@ -149,9 +153,27 @@ check("other host saw no Authorization header",
 err, out = call("http_request", {"credential": "nope", "path": "/"})
 check("unknown credential gives a helpful error", err and "keymule list" in out, out)
 
+raw = json.load(open(vault))["bamboo"]
+check("old bare secret was upgraded to a sealed item",
+      raw.startswith(SEAL) and json.loads(raw[len(SEAL):])["hosts"] == [f"127.0.0.1:{port_a}"], raw)
+
+# An agent edits credentials.toml to allow another host: the seal still wins.
+toml_path = os.path.join(home, "credentials.toml")
+orig_toml = open(toml_path).read()
+with open(toml_path, "w") as f:
+    f.write(orig_toml.replace(f'hosts = ["127.0.0.1:{port_a}"]',
+                              f'hosts = ["127.0.0.1:{port_a}", "localhost:{port_b}"]'))
+before = len(seen)
+err, out = call("http_request", {"credential": "bamboo", "path": f"http://localhost:{port_b}/blob"})
+check("editing credentials.toml can't add a host", err and "refusing" in out and len(seen) == before, out)
+l = subprocess.run([BIN, "list"], env=env, text=True, capture_output=True)
+check("keymule list flags the edited file", "edited outside keymule" in l.stdout, l.stdout + l.stderr)
+with open(toml_path, "w") as f:
+    f.write(orig_toml)
+
 # ---- adding / rotating / updating through MCP (dialog answered by env) ----
 dlog = os.path.join(home, "dialogs.log")
-vault_now = lambda: json.load(open(vault))
+vault_now = lambda: {k: secret_of(v) for k, v in json.load(open(vault)).items()}
 fake = f"http://127.0.0.1:{port_a}"
 
 session(KEYMULE_TEST_DIALOG=SECRET, KEYMULE_TEST_DIALOG_LOG=dlog)
@@ -178,6 +200,9 @@ check("cancelling the dialog saves nothing", err and "cancelled" in out and "gh2
 
 with open(os.path.join(home, "credentials.toml"), "a") as f:
     f.write('\n[credentials.pasted]\nservice = "bamboo"\nauth = { type = "bearer" }\n')
+v = json.load(open(vault)); v["pasted"] = "pasted-token-value-123"
+with open(vault, "w") as f:
+    json.dump(v, f)
 err, out = call("list_credentials", {})
 check("half-set-up credential tells the agent what to do", "update_credential" in out, out)
 session(KEYMULE_TEST_DIALOG="deny")
@@ -212,7 +237,7 @@ h = subprocess.run([BIN, "hook", "prompt"], env=env, text=True, capture_output=T
 out = json.loads(h.stdout)
 check("hook blocks prompt containing a token", out["decision"] == "block", h.stdout)
 check("hook message does not echo the token", pasted not in out["reason"], out["reason"])
-check("hook saved it to the vault", json.load(open(vault)).get("github") == pasted)
+check("hook saved it to the vault", vault_now().get("github") == pasted)
 print("\n--- what the user sees ---\n" + out["reason"] + "\n---")
 h = subprocess.run([BIN, "hook", "prompt"], env=env, text=True, capture_output=True,
                    input=json.dumps({"prompt": "check my bamboo pipeline"}))

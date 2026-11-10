@@ -169,6 +169,82 @@ pub fn host_of(url: &str) -> Result<String> {
     })
 }
 
+// ---- sealed credentials ----------------------------------------------------
+
+/// Marks a keychain item that holds a [`Sealed`] credential rather than a
+/// bare secret (items written before 0.4).
+const SEAL_TAG: &str = "keymule-sealed-v1:";
+
+/// A secret together with the rules for using it, stored as one keychain
+/// item. credentials.toml is a plain file any agent can edit, so the hosts a
+/// secret may go to and how it is sent are taken from here, never from the
+/// file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sealed {
+    pub secret: String,
+    pub hosts: Vec<String>,
+    pub auth: Auth,
+}
+
+impl Sealed {
+    pub fn new(secret: impl Into<String>, cred: &Credential) -> Self {
+        Self {
+            secret: secret.into(),
+            hosts: cred.hosts.clone(),
+            auth: cred.auth.clone(),
+        }
+    }
+
+    /// Parse a keychain item. Old bare secrets are sealed with `cred`'s
+    /// current rules; the bool says whether that happened.
+    fn parse(raw: String, cred: &Credential) -> Result<(Self, bool)> {
+        match raw.strip_prefix(SEAL_TAG) {
+            Some(json) => Ok((
+                serde_json::from_str(json).context("keychain item is damaged")?,
+                false,
+            )),
+            None => Ok((Self::new(raw, cred), true)),
+        }
+    }
+
+    /// Load `name`, upgrading an old bare secret to a sealed item.
+    pub fn load(vault: &dyn Vault, name: &str, cred: &Credential) -> Result<Self> {
+        let (sealed, legacy) = Self::parse(vault.get(name)?, cred)?;
+        if legacy {
+            sealed.save(vault, name)?;
+        }
+        Ok(sealed)
+    }
+
+    /// Just the secret, without upgrading anything (for the doctor).
+    pub fn peek_secret(vault: &dyn Vault, name: &str) -> Option<String> {
+        let raw = vault.get(name).ok()?;
+        match raw.strip_prefix(SEAL_TAG) {
+            Some(json) => serde_json::from_str::<Self>(json).ok().map(|s| s.secret),
+            None => Some(raw),
+        }
+    }
+
+    pub fn save(&self, vault: &dyn Vault, name: &str) -> Result<()> {
+        vault.set(name, &format!("{SEAL_TAG}{}", serde_json::to_string(self)?))
+    }
+
+    /// `cred` with the sealed hosts and auth: what requests must use.
+    pub fn apply(&self, cred: &Credential) -> Credential {
+        Credential {
+            hosts: self.hosts.clone(),
+            auth: self.auth.clone(),
+            ..cred.clone()
+        }
+    }
+
+    /// True if credentials.toml disagrees with the sealed rules, i.e. the
+    /// file was edited by hand (or by something else).
+    pub fn differs_from(&self, cred: &Credential) -> bool {
+        self.hosts != cred.hosts || self.auth != cred.auth
+    }
+}
+
 // ---- secret storage -------------------------------------------------------
 
 pub trait Vault {
@@ -312,6 +388,36 @@ mod tests {
         assert_eq!(again.creds, store.creds);
         assert_eq!(again.free_name("bamboo"), "bamboo-2");
         assert_eq!(again.free_name("github"), "github");
+    }
+
+    #[test]
+    fn sealed_rules_beat_an_edited_file() {
+        let vault = testing::MemVault::default();
+        let mut cred = Credential {
+            service: "bamboo".into(),
+            url: "https://bamboo.corp".into(),
+            description: String::new(),
+            auth: Auth::Bearer,
+            hosts: vec!["bamboo.corp".into()],
+            added_by: "cli".into(),
+        };
+        // An item from before sealing is upgraded on first load.
+        vault.set("b", "tok-123").unwrap();
+        let sealed = Sealed::load(&vault, "b", &cred).unwrap();
+        assert_eq!(sealed.secret, "tok-123");
+        assert!(vault.get("b").unwrap().starts_with(SEAL_TAG));
+        assert_eq!(Sealed::peek_secret(&vault, "b").unwrap(), "tok-123");
+
+        // Someone adds a host to credentials.toml: the seal still wins.
+        cred.hosts.push("evil.example".into());
+        cred.auth = Auth::Header {
+            name: "X-Echo".into(),
+        };
+        let sealed = Sealed::load(&vault, "b", &cred).unwrap();
+        assert!(sealed.differs_from(&cred));
+        let used = sealed.apply(&cred);
+        assert_eq!(used.hosts, ["bamboo.corp"]);
+        assert_eq!(used.auth, Auth::Bearer);
     }
 
     #[test]

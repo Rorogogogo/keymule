@@ -17,7 +17,7 @@ use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
 use presets::{AuthKind, PRESETS};
-use store::{Auth, Credential, Store, host_of, validate_name};
+use store::{Auth, Credential, Sealed, Store, host_of, validate_name};
 
 /// Let AI agents use your tokens and passwords without ever seeing them.
 #[derive(Parser)]
@@ -268,7 +268,7 @@ async fn add(
         }
     }
 
-    store::vault().set(&name, &secret)?;
+    Sealed::new(secret, &cred).save(store::vault().as_ref(), &name)?;
     store.creds.insert(name.clone(), cred);
     store.save()?;
     println!("Saved \"{name}\". Your agent can now use it by name; it will never see the secret.");
@@ -293,6 +293,7 @@ fn list() -> Result<()> {
             s.used_by.len()
         );
     }
+    let vault = store::vault();
     for (name, c) in &store.creds {
         let url = if c.url.is_empty() {
             "(no URL: keymule edit --url)"
@@ -300,6 +301,15 @@ fn list() -> Result<()> {
             &c.url
         };
         println!("{name:<16} {:<8} {:<40} {}", c.service, url, c.auth.label());
+        if let Ok(sealed) = Sealed::load(vault.as_ref(), name, c)
+            && sealed.differs_from(c)
+        {
+            println!(
+                "  ⚠ credentials.toml was edited outside keymule; still only sent to {} ({})",
+                sealed.hosts.join(", "),
+                sealed.auth.label()
+            );
+        }
     }
     Ok(())
 }
@@ -312,7 +322,10 @@ fn edit(
     description: Option<String>,
 ) -> Result<()> {
     let mut store = Store::load()?;
-    let mut cred = store.get(name)?.clone();
+    let vault = store::vault();
+    let mut sealed = Sealed::load(vault.as_ref(), name, store.get(name)?)?;
+    // Start from the sealed rules, not whatever the file says now.
+    let mut cred = sealed.apply(store.get(name)?);
 
     if let Some(s) = service {
         let Some(p) = presets::find(&s) else {
@@ -340,6 +353,9 @@ fn edit(
     if let Some(d) = description {
         cred.description = d;
     }
+    sealed.hosts = cred.hosts.clone();
+    sealed.auth = cred.auth.clone();
+    sealed.save(vault.as_ref(), name)?;
     store.creds.insert(name.to_string(), cred);
     store.save()?;
     println!("Updated \"{name}\".");
@@ -351,7 +367,9 @@ async fn rotate(name: &str, no_verify: bool) -> Result<()> {
     if store.servers.contains_key(name) && !store.creds.contains_key(name) {
         return rotate_server(name);
     }
-    let cred = store.get(name)?.clone();
+    let vault = store::vault();
+    let mut sealed = Sealed::load(vault.as_ref(), name, store.get(name)?)?;
+    let cred = sealed.apply(store.get(name)?);
     let secret = tty::secret(&format!("New secret for {name} (hidden): "))?;
     if !no_verify && !cred.url.is_empty() {
         match http::verify(name, &cred, &secret).await {
@@ -363,16 +381,18 @@ async fn rotate(name: &str, no_verify: bool) -> Result<()> {
             }
         }
     }
-    store::vault().set(name, &secret)?;
+    sealed.secret = secret;
+    sealed.save(vault.as_ref(), name)?;
     println!("Rotated \"{name}\". Revoke the old token at the service if you haven't.");
     Ok(())
 }
 
 async fn test(name: &str) -> Result<()> {
     let store = Store::load()?;
-    let cred = store.get(name)?;
-    let secret = store::vault().get(name)?;
-    match http::verify(name, cred, &secret).await {
+    let sealed = Sealed::load(store::vault().as_ref(), name, store.get(name)?)?;
+    let cred = sealed.apply(store.get(name)?);
+    let secret = sealed.secret;
+    match http::verify(name, &cred, &secret).await {
         Ok(Some(who)) => println!("✓ {name} works ({who})"),
         Ok(None) => println!("· {name}: no verify endpoint for this service"),
         Err(e) => bail!("{}", http::redact(&format!("{e:#}"), &secret)),

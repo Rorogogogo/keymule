@@ -29,7 +29,7 @@ Agent:  Build #482 failed in "Integration tests"…
 ## ✨ Features
 
 - 🙈 **The agent never sees the secret.** It refers to credentials by name; the secret is attached inside keymule and redacted from every response.
-- 🔒 **Locked to hosts.** A Bamboo token only goes to your Bamboo host. Requests elsewhere are refused, and redirects to other hosts are followed *without* the token.
+- 🔒 **Locked to hosts.** A Bamboo token only goes to your Bamboo host. Requests elsewhere are refused, and redirects to other hosts are followed *without* the token. The allowed hosts are sealed in the keychain with the token, so editing keymule's files doesn't change them.
 - ✋ **Paste-to-save.** Paste a token into Claude Code by habit and a hook catches it *before* it is sent, saves it to the keychain and blocks the message.
 - 🧑‍💻 **A human approves the dangerous bits.** Pointing a credential at a new host or deleting it needs you at a real terminal, so a prompt-injected agent can't redirect your token.
 - 🚫 **No reveal command.** There is deliberately no `keymule get`; an agent with a shell could just run it.
@@ -161,8 +161,8 @@ paste-to-save hook is Claude Code only for now.
 
 | What | Where |
 |---|---|
-| Secrets | OS keychain (macOS Keychain, Windows Credential Manager, Secret Service), service `keymule` |
-| Metadata | `~/.config/keymule/credentials.toml` (no secrets) |
+| Secrets, with their allowed hosts, auth scheme and (for MCP servers) allowed commands | OS keychain (macOS Keychain, Windows Credential Manager, Secret Service), service `keymule` |
+| Readable index | `~/.config/keymule/credentials.toml`: names, URLs, descriptions. No secrets, and not trusted: if it disagrees with the keychain, the keychain wins and `keymule list` warns you |
 | Audit log | `~/.config/keymule/audit.log` |
 
 On macOS, the keychain only hands keymule's items to keymule itself. Another process (say, an

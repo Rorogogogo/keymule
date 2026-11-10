@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::detect;
 use crate::presets::{self, AuthKind};
-use crate::store::{Auth, Credential, Store, Vault, host_of};
+use crate::store::{Auth, Credential, Sealed, Store, Vault, host_of};
 
 /// Put this anywhere in a prompt to send it as-is.
 pub const IGNORE_MARKER: &str = "#keymule-ignore";
@@ -99,18 +99,16 @@ fn save(found: &detect::Found, store: &mut Store, vault: &dyn Vault) -> Result<(
         todo.push("--service <bamboo|github|...>".to_string());
     }
 
-    vault.set(&name, &found.value)?;
-    store.creds.insert(
-        name.clone(),
-        Credential {
-            service: preset.id.into(),
-            url,
-            description: String::new(),
-            auth,
-            hosts,
-            added_by: "paste-hook".into(),
-        },
-    );
+    let cred = Credential {
+        service: preset.id.into(),
+        url,
+        description: String::new(),
+        auth,
+        hosts,
+        added_by: "paste-hook".into(),
+    };
+    Sealed::new(found.value.clone(), &cred).save(vault, &name)?;
+    store.creds.insert(name.clone(), cred);
     if let Err(e) = store.save() {
         let _ = vault.delete(&name);
         store.creds.remove(&name);
@@ -155,7 +153,7 @@ mod tests {
             "the secret must not be echoed"
         );
         assert_eq!(
-            v.get("bamboo").unwrap(),
+            Sealed::peek_secret(&v, "bamboo").unwrap(),
             "NjQ3MjE4MzQ1Njc4OkxQmPq9Zr2Wd+Hs8"
         );
         assert_eq!(s.creds["bamboo"].added_by, "paste-hook");
