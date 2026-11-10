@@ -126,6 +126,30 @@ impl Binding {
     }
 }
 
+/// Ask the user whether `argv` may receive `name`'s secrets.
+fn approve(name: &str, binding: &Binding, argv: &[String]) -> Result<()> {
+    let vars: Vec<&str> = binding.env.keys().map(String::as_str).collect();
+    let what = if vars.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", vars.join(", "))
+    };
+    let allowed = crate::dialog::confirm(&format!(
+        "An MCP server wants to start with your keymule secret \"{name}\"{what}.\n\n\
+         Command:\n\n        {}\n\n\
+         Only allow this if you set up this server.",
+        argv.join(" ")
+    ))
+    .context("keymule needs to ask you about a new command, but can't show a dialog here")?;
+    if !allowed {
+        bail!(
+            "you didn't allow `{}` to use \"{name}\"; it was not started",
+            argv.join(" ")
+        );
+    }
+    Ok(())
+}
+
 fn item(name: &str) -> String {
     format!("{ITEM_PREFIX}{name}")
 }
@@ -156,16 +180,35 @@ fn is_executable(p: &Path) -> bool {
     }
 }
 
-/// `keymule exec <name> -- <command…>`: start an adopted MCP server with its
-/// secrets. On Unix keymule replaces itself with the server, so stdio and
-/// signals behave exactly as before.
-pub fn exec(vault: &dyn Vault, name: &str, argv: &[String]) -> Result<()> {
+/// `keymule exec <name> [--env VAR] -- <command…>`: start an MCP server with
+/// its secrets. A command line keymule hasn't seen with these secrets needs
+/// the user's OK in a dialog first. `--env VAR` puts a single-value secret
+/// into VAR (servers name their variable differently). On Unix keymule
+/// replaces itself with the server, so stdio and signals behave as before.
+pub fn exec(vault: &dyn Vault, name: &str, rename: &[String], argv: &[String]) -> Result<()> {
     if argv.is_empty() {
-        bail!("usage: keymule exec <name> -- <command> [args…]");
+        bail!("usage: keymule exec <name> [--env VAR] -- <command> [args…]");
     }
-    let binding = Binding::load(vault, name)
-        .with_context(|| format!("no adopted MCP server named \"{name}\""))?;
+    let mut binding = Binding::load(vault, name)
+        .with_context(|| format!("keymule has no MCP server secret named \"{name}\""))?;
+    if !binding.commands.iter().any(|c| c == argv) {
+        approve(name, &binding, argv)?;
+        binding.allow(argv);
+        binding.save(vault, name)?;
+    }
     let mut cmd = binding.command(name, argv)?;
+    if !rename.is_empty() {
+        let [(var, value)] = binding.env.iter().collect::<Vec<_>>()[..] else {
+            bail!(
+                "--env only works for a secret with exactly one value; \"{name}\" has {}",
+                binding.env.len()
+            );
+        };
+        cmd.env_remove(var);
+        for to in rename {
+            cmd.env(to, value);
+        }
+    }
     crate::http::audit(name, "START", &argv.join(" "), 0);
     #[cfg(unix)]
     {

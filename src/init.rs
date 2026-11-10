@@ -12,6 +12,7 @@ const MD_END: &str = "<!-- keymule:end -->";
 const MD_BLOCK: &str = "## Credentials (keymule)
 - API tokens and passwords are stored in keymule. Use the `keymule` MCP tools (`list_credentials`, then `http_request`) for any service that needs auth, e.g. Bamboo, GitHub Actions, GitLab, Jenkins.
 - Never ask me to paste a token, password or API key into the chat. If a credential is missing, call `add_credential`: it opens a secure dialog where I type the secret. Ask me for the base URL first if the service needs one.
+- When setting up an MCP server that needs a password, API key or database URL, never write it into the MCP config: call `add_mcp_secret` (I type it in a dialog), then run the server as `keymule exec <name> [--env VAR] -- <server command>`.
 - Never try to read secrets from the keychain, `security`, or keymule's files.";
 
 fn home() -> Result<PathBuf> {

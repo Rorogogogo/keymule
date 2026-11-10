@@ -242,6 +242,12 @@ print("\n--- what the user sees ---\n" + out["reason"] + "\n---")
 h = subprocess.run([BIN, "hook", "prompt"], env=env, text=True, capture_output=True,
                    input=json.dumps({"prompt": "check my bamboo pipeline"}))
 check("clean prompt passes through", h.returncode == 0 and h.stdout == "", h.stdout)
+h = subprocess.run([BIN, "hook", "prompt"], env=env, text=True, capture_output=True,
+                   input=json.dumps({"prompt": "add a pg mcp for postgres://app:Zt5Wq8Rm2Nx6@db.corp:5432/app"}))
+out = json.loads(h.stdout)
+check("hook blocks a database URL and saves it as an MCP secret",
+      out["decision"] == "block" and "saved as `postgres`" in out["reason"] and "Zt5Wq8Rm2Nx6" not in out["reason"]
+      and "Zt5Wq8Rm2Nx6" in vault_now().get("mcp:postgres", ""), h.stdout)
 
 # ---- CLI used by the Claude Code panel ---------------------------------------
 l = subprocess.run([BIN, "list", "--json"], env=env, text=True, capture_output=True)
@@ -280,8 +286,33 @@ check("adopt --yes moves the key out of the config",
 r = subprocess.run([cfg["command"]] + cfg["args"], env=aenv, text=True, capture_output=True)
 check("the rewritten entry starts the server with its key",
       r.stdout.strip() == f"server got key of length {len(mcp_key)}", r.stdout + r.stderr)
-r = subprocess.run([BIN, "exec", "myapp", "--", "env"], env=aenv, text=True, capture_output=True)
-check("exec refuses any other command", r.returncode != 0 and mcp_key not in r.stdout + r.stderr, r.stdout + r.stderr)
+r = subprocess.run([BIN, "exec", "myapp", "--", "env"], env=dict(aenv, KEYMULE_TEST_DIALOG="deny"),
+                   text=True, capture_output=True)
+check("a new command the user doesn't approve gets nothing",
+      r.returncode != 0 and "didn't allow" in r.stderr and mcp_key not in r.stdout + r.stderr, r.stdout + r.stderr)
+probe = ["sh", "-c", 'echo "len=${#MYAPP_API_KEY}"']
+r = subprocess.run([BIN, "exec", "myapp", "--"] + probe, env=dict(aenv, KEYMULE_TEST_DIALOG="allow"),
+                   text=True, capture_output=True)
+check("a new command the user approves gets the secret", r.stdout.strip() == f"len={len(mcp_key)}", r.stdout + r.stderr)
+r = subprocess.run([BIN, "exec", "myapp", "--"] + probe, env=dict(aenv, KEYMULE_TEST_DIALOG="deny"),
+                   text=True, capture_output=True)
+check("an approved command isn't asked about again", r.stdout.strip() == f"len={len(mcp_key)}", r.stdout + r.stderr)
+
+# ---- add_mcp_secret: agent sets up a DB MCP without seeing the URL ----------
+db_url = "postgres://app:Vq7Lp2Xk9Rt4@db.internal:5432/app"
+session(KEYMULE_TEST_DIALOG=db_url)
+err, out = call("add_mcp_secret", {"name": "pg-dev", "env": "DATABASE_URI", "description": "dev database"})
+check("add_mcp_secret stores the value typed in the dialog",
+      not err and "exec pg-dev" in out and db_url not in out and vault_now().get("mcp:pg-dev", "").find("Vq7Lp2Xk9Rt4") > 0, out)
+err, out = call("list_credentials", {})
+check("list_credentials shows MCP secrets by name only", "pg-dev" in out and "Vq7Lp2Xk9Rt4" not in out, out)
+p.stdin.close()
+p.wait(timeout=5)
+probe = ["sh", "-c", 'echo "uri=${#DATABASE_URI} url=${#DATABASE_URL}"']
+r = subprocess.run([BIN, "exec", "pg-dev", "--env", "DATABASE_URL", "--"] + probe,
+                   env=dict(env, KEYMULE_TEST_DIALOG="allow"), text=True, capture_output=True)
+check("exec --env renames a single-value secret",
+      r.stdout.strip() == f"uri=0 url={len(db_url)}", r.stdout + r.stderr)
 
 print(f"\n{'ALL PASSED' if not fails else f'{fails} FAILED'}")
 sys.exit(1 if fails else 0)

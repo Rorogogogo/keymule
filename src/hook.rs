@@ -42,6 +42,21 @@ pub fn check(prompt: &str, store: &mut Store, vault: &dyn Vault) -> Option<Strin
     )];
     let mut first_name = None;
     for f in &found {
+        if f.service == Some(detect::DATABASE) {
+            match save_database(f, store, vault) {
+                Ok(name) => {
+                    lines.push(format!(
+                        "  ✓ saved as `{name}` ({}, for an MCP server)\n      \
+                         use it: ask your agent to set up the server with `keymule exec {name} --env <VAR> -- <server command>`;\n      \
+                         keymule asks you once to approve that command",
+                        f.label.as_deref().unwrap_or("database URL")
+                    ));
+                    first_name.get_or_insert(name);
+                }
+                Err(e) => lines.push(format!("  ✗ could not save it ({e:#})")),
+            }
+            continue;
+        }
         match save(f, store, vault) {
             Ok((name, todo)) => {
                 let title = presets::get_or_generic(&store.creds[&name].service).title;
@@ -62,6 +77,39 @@ pub fn check(prompt: &str, store: &mut Store, vault: &dyn Vault) -> Option<Strin
         "(False alarm? Add {IGNORE_MARKER} to the message to send it unchanged.)"
     ));
     Some(lines.join("\n"))
+}
+
+/// A database URL becomes an MCP server secret (env `DATABASE_URL`, which
+/// `keymule exec --env` can rename). No command may use it until the user
+/// approves one.
+fn save_database(found: &detect::Found, store: &mut Store, vault: &dyn Vault) -> Result<String> {
+    let scheme = found.value.split("://").next().unwrap_or("db");
+    let base = match scheme {
+        "postgres" | "postgresql" => "postgres",
+        "mongodb+srv" => "mongodb",
+        "rediss" => "redis",
+        s => s,
+    };
+    let name = store.free_name(base);
+    let mut binding = crate::servers::Binding::default();
+    binding
+        .env
+        .insert("DATABASE_URL".into(), found.value.clone());
+    binding.save(vault, &name)?;
+    store.servers.insert(
+        name.clone(),
+        crate::store::ServerMeta {
+            env: vec!["DATABASE_URL".into()],
+            arg_secrets: 0,
+            used_by: Vec::new(),
+        },
+    );
+    if let Err(e) = store.save() {
+        let _ = crate::servers::Binding::delete(vault, &name);
+        store.servers.remove(&name);
+        return Err(e);
+    }
+    Ok(name)
 }
 
 fn save(found: &detect::Found, store: &mut Store, vault: &dyn Vault) -> Result<(String, String)> {
@@ -166,6 +214,20 @@ mod tests {
         let reason = check("ghp_abcdefghijklmnopqrstuvwxyz0123456789", &mut s, &v).unwrap();
         assert!(!reason.contains("finish setup"));
         assert_eq!(s.creds["github"].hosts, vec!["api.github.com"]);
+    }
+
+    #[test]
+    fn database_url_becomes_an_mcp_secret() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        let url = "postgres://app:Vq7Lp2Xk9Rt4@db.internal:5432/app";
+        let reason = check(&format!("add a pg mcp for {url}"), &mut s, &v).unwrap();
+        assert!(reason.contains("saved as `postgres`"), "{reason}");
+        assert!(!reason.contains("Vq7Lp2Xk9Rt4"));
+        let b = crate::servers::Binding::load(&v, "postgres").unwrap();
+        assert_eq!(b.env["DATABASE_URL"], url);
+        assert!(b.commands.is_empty(), "no command is approved yet");
+        assert!(s.servers.contains_key("postgres") && s.creds.is_empty());
     }
 
     #[test]

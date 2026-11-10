@@ -114,6 +114,9 @@ enum Cmd {
     /// Start an adopted MCP server with its secrets (used in agent configs).
     Exec {
         name: String,
+        /// Put the secret into this env var instead (for a single-value secret).
+        #[arg(long = "env", value_name = "VAR")]
+        rename: Vec<String>,
         /// The server's command, exactly as adopted.
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -231,7 +234,11 @@ async fn run(cli: Cli) -> Result<()> {
             yes,
             servers,
         } => adopt(dry_run, yes, servers),
-        Cmd::Exec { name, command } => servers::exec(store::vault().as_ref(), &name, &command),
+        Cmd::Exec {
+            name,
+            rename,
+            command,
+        } => servers::exec(store::vault().as_ref(), &name, &rename, &command),
         Cmd::Init { dry_run } => init::run(dry_run),
         Cmd::Mcp => mcp::serve().await,
         Cmd::Hook {

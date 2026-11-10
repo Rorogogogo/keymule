@@ -80,6 +80,17 @@ static URL_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"\b([a-z][a-z0-9+.-]*)://[^/\s:@"'<>]+:([^@\s/"'<>]{4,})@"#).unwrap()
 });
 
+/// A database URL with a password, e.g. `postgres://app:pw@db.internal/app`.
+static DB_URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"\b((postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|mssql|sqlserver|amqps?)://[^/\s:@"'<>]+:([^@\s/"'<>]+)@[^\s"'<>]+)"#,
+    )
+    .unwrap()
+});
+
+/// Preset-like id for database URLs: hook saves them as MCP server secrets.
+pub const DATABASE: &str = "database";
+
 static BEARER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bBearer\s+([A-Za-z0-9_\-.=+/]{20,})").unwrap());
 
@@ -123,6 +134,20 @@ pub fn scan(text: &str) -> Vec<Found> {
         if looks_random(value) {
             push(&mut found, value, service_near(text), None, false);
         }
+    }
+    for caps in DB_URL.captures_iter(text) {
+        let password = &caps[3];
+        if password.starts_with(['$', '{', '<']) || looks_fake(password) {
+            continue;
+        }
+        let scheme = caps[2].trim_end_matches("ql").replace("+srv", "");
+        push(
+            &mut found,
+            caps[1].trim_end_matches(['.', ',', ')']),
+            Some(DATABASE),
+            Some(format!("{scheme} URL with password")),
+            true,
+        );
     }
     found
 }
@@ -338,6 +363,22 @@ mod tests {
         let f = scan_deep(r#"{"env":{"STRIPE_SECRET_KEY":"Zq8vL2mK9xR4tW7pN3bY6cJ1"}}"#);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].label.as_deref(), Some("STRIPE_SECRET_KEY"));
+    }
+
+    #[test]
+    fn database_urls_in_prompts() {
+        let f = scan("add a pg mcp for postgres://app:Vq7Lp2Xk9Rt4@db.internal:5432/app please");
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(
+            f[0].value,
+            "postgres://app:Vq7Lp2Xk9Rt4@db.internal:5432/app"
+        );
+        assert_eq!(f[0].service, Some(DATABASE));
+        assert_eq!(f[0].label.as_deref(), Some("postgres URL with password"));
+        // Defaults and placeholders are fine to discuss.
+        assert!(scan("postgres://postgres:postgres@localhost:5432/dev").is_empty());
+        assert!(scan("postgresql://user:${PGPASSWORD}@localhost/db").is_empty());
+        assert!(scan("mysql://root:<password>@localhost/db").is_empty());
     }
 
     #[test]

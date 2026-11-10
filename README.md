@@ -93,8 +93,20 @@ and `${VAR}` references stay where they are. Default-looking passwords (a local 
 `postgres`, say) are skipped unless you name the server: `keymule adopt --server my-db`.
 
 The secrets and the exact command lines allowed to receive them are sealed together in one
-keychain item. `keymule exec acme -- env` is refused, and editing the config to point at another
-program doesn't get the key either. `keymule rotate acme` stores a new value.
+keychain item. A command keymule hasn't seen (`keymule exec acme -- env`, or a config edited to
+point at another program) only gets the key after you approve it in a dialog. `keymule rotate acme`
+stores a new value.
+
+### New MCP servers, without the password ever reaching the chat
+
+> *add a postgres MCP for my dev database*
+
+The agent calls `add_mcp_secret(name="pg-dev", env="DATABASE_URI")`, you type the URL into
+keymule's dialog, and the agent configures the server as
+`keymule exec pg-dev -- postgres-mcp --access-mode=restricted`. When it first starts, keymule shows
+you that command and asks whether it may have the secret. If you paste a database URL into chat
+by habit, the paste hook blocks it and saves it the same way (`keymule exec postgres --env
+DATABASE_URI -- …`).
 
 ---
 
@@ -133,7 +145,7 @@ up to `settings.json.keymule-bak`.
 | `keymule presets` | List service presets |
 | `keymule doctor [--all] [--json] [--dir D]` | Find leaked and plain-text secrets |
 | `keymule adopt [--dry-run] [--yes] [--server NAME]` | Move plain-text MCP server secrets into the keychain |
-| `keymule exec <name> -- <command…>` | Start an adopted MCP server with its secrets (used in configs) |
+| `keymule exec <name> [--env VAR] -- <command…>` | Start an MCP server with its secrets (used in configs). New commands need your approval once |
 | `keymule init` | Set up Claude Code |
 | `keymule mcp` | The MCP server (started by your agent) |
 | `keymule hook prompt` | The Claude Code `UserPromptSubmit` hook |
@@ -147,6 +159,7 @@ up to `settings.json.keymule-bak`.
 | `add_credential` | Opens a secure dialog for the user to type the secret; verifies and stores it |
 | `rotate_credential` | Same dialog, for a new token on an existing credential |
 | `update_credential` | Change URL, username or description; a new host needs the user's approval in a dialog |
+| `add_mcp_secret` | Store a secret an MCP server needs (database URL, API key) via the dialog, for `keymule exec` |
 | `scan_for_leaks` | Run the doctor and return masked results |
 
 The secret never travels through the MCP connection. There is no tool that takes or returns one.
@@ -173,7 +186,7 @@ agent running `security find-generic-password`) triggers a system prompt you hav
 
 ## ⚠️ Limits
 
-- Paste detection is reliable for prefixed tokens (`ghp_`, `github_pat_`, `glpat-`, `sk-`, `AKIA`…). Unprefixed tokens such as Bamboo's are caught when the message gives context ("my bamboo token is …").
+- Paste detection is reliable for prefixed tokens (`ghp_`, `github_pat_`, `glpat-`, `sk-`, `AKIA`…) and database URLs with a password. Unprefixed tokens such as Bamboo's are caught when the message gives context ("my bamboo token is …"). Default passwords like `postgres:postgres@localhost` pass through.
 - HTTP APIs only. Database, SSH and cloud CLI credentials are on the roadmap.
 - The secure dialog is macOS-only for now; elsewhere use `keymule add` in a terminal.
 - The agent picks the URL in `add_credential`, so read the host in the dialog before typing your token.

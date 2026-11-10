@@ -25,7 +25,10 @@ credential name. Never ask the user to paste a token, password or API key into t
 matching credential exists, call add_credential: keymule shows a secure dialog on the user's \
 screen where they type the secret, and you never see it. Ask the user for the service's base URL \
 first if needed (URLs are not secret). If a token stops working (HTTP 401), offer \
-rotate_credential.";
+rotate_credential. When you set up an MCP server that needs a password, API key or database URL, \
+never write the secret into the MCP config or ask for it in chat: call add_mcp_secret (the user \
+types it in a dialog), then configure the server to run `keymule exec <name> [--env VAR] -- \
+<server command>`. The user approves that command once, in a dialog, when it first starts.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddArgs {
@@ -67,6 +70,17 @@ pub struct ScanArgs {
     /// Project directory to check for .env and .mcp.json files (default: the server's working directory).
     #[serde(default)]
     pub dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct McpSecretArgs {
+    /// Name to store it under, e.g. "pg-local". Letters, digits, '-' and '_'.
+    pub name: String,
+    /// The env var the MCP server reads it from, e.g. "DATABASE_URI" or "NOTION_TOKEN".
+    pub env: String,
+    /// What it is, shown in the dialog, e.g. "Postgres URL for the local dev database".
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -231,6 +245,60 @@ async fn rotate(a: RotateArgs) -> anyhow::Result<String> {
     ))
 }
 
+async fn add_mcp_secret(a: McpSecretArgs) -> anyhow::Result<String> {
+    validate_name(&a.name)?;
+    let env_ok = !a.env.is_empty()
+        && a.env.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !a.env.starts_with(|c: char| c.is_ascii_digit());
+    if !env_ok {
+        bail!("env must be a variable name like DATABASE_URI");
+    }
+    let store = Store::load()?;
+    if store.creds.contains_key(&a.name) || store.servers.contains_key(&a.name) {
+        bail!("\"{}\" already exists; pick another name", a.name);
+    }
+    let what = a
+        .description
+        .as_deref()
+        .map(|d| format!(" ({d})"))
+        .unwrap_or_default();
+    let value = ask_secret(format!(
+        "Your agent is setting up an MCP server that needs {}{what}.\n\n\
+         Type the value here. keymule keeps it in the keychain, and only a server command you \
+         approve will get it.",
+        a.env
+    ))
+    .await?;
+
+    let mut binding = crate::servers::Binding::default();
+    binding.env.insert(a.env.clone(), value);
+    let mut store = Store::load()?;
+    if store.creds.contains_key(&a.name) || store.servers.contains_key(&a.name) {
+        bail!(
+            "\"{}\" was created by something else meanwhile. Nothing was saved.",
+            a.name
+        );
+    }
+    binding.save(store::vault().as_ref(), &a.name)?;
+    store.servers.insert(
+        a.name.clone(),
+        crate::store::ServerMeta {
+            env: vec![a.env.clone()],
+            arg_secrets: 0,
+            used_by: Vec::new(),
+        },
+    );
+    store.save()?;
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "keymule".into());
+    Ok(format!(
+        "Saved \"{name}\". Configure the MCP server with command \"{exe}\" and args [\"exec\", \"{name}\", \"--\", <the server's command and args>]. keymule sets {env} for it. Do not put the value in the config. The first time the server starts, the user approves the command in a dialog. Example: claude mcp add <server> -- \"{exe}\" exec {name} -- <command> <args>",
+        name = a.name,
+        env = a.env,
+    ))
+}
+
 async fn update(a: UpdateArgs) -> anyhow::Result<String> {
     let mut sealed = load_sealed(&a.name).await?;
     // Check new hosts against the sealed rules, not the editable file.
@@ -340,7 +408,7 @@ impl Server {
             Ok(s) => s,
             Err(e) => return Ok(tool_error(format!("{e:#}"))),
         };
-        if store.creds.is_empty() {
+        if store.creds.is_empty() && store.servers.is_empty() {
             return Ok(text(
                 "No credentials stored yet. Use add_credential (services: bamboo, github, gitlab, \
                  jenkins, generic); the user types the secret into a secure dialog.",
@@ -374,9 +442,23 @@ impl Server {
                 })
             })
             .collect();
-        Ok(text(
-            serde_json::to_string_pretty(&list).unwrap_or_default(),
-        ))
+        let servers: Vec<_> = store
+            .servers
+            .iter()
+            .map(|(name, s)| {
+                serde_json::json!({
+                    "name": name,
+                    "kind": "MCP server secret (not for http_request)",
+                    "env": s.env,
+                    "used_by": s.used_by,
+                    "how_to_use": format!(
+                        "in an MCP server config: keymule exec {name} [--env VAR] -- <server command>"
+                    ),
+                })
+            })
+            .collect();
+        let out = serde_json::json!({ "credentials": list, "mcp_server_secrets": servers });
+        Ok(text(serde_json::to_string_pretty(&out).unwrap_or_default()))
     }
 
     #[tool(
@@ -435,6 +517,16 @@ impl Server {
         Parameters(args): Parameters<RotateArgs>,
     ) -> Result<CallToolResult, McpError> {
         Ok(done(rotate(args).await))
+    }
+
+    #[tool(
+        description = "Store a secret an MCP server needs (database URL, API key, password) without it entering the chat or a config file. Opens a secure dialog where the user types it. Then configure the server to run `keymule exec <name> -- <server command>`; keymule passes the secret in the env var you name, and the user approves the command once when it first starts."
+    )]
+    async fn add_mcp_secret(
+        &self,
+        Parameters(args): Parameters<McpSecretArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(done(add_mcp_secret(args).await))
     }
 
     #[tool(

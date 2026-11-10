@@ -131,12 +131,13 @@ impl Store {
 
     /// `base`, or `base-2`, `base-3`… whichever is free.
     pub fn free_name(&self, base: &str) -> String {
-        if !self.creds.contains_key(base) {
+        let taken = |n: &str| self.creds.contains_key(n) || self.servers.contains_key(n);
+        if !taken(base) {
             return base.to_string();
         }
         (2..)
             .map(|n| format!("{base}-{n}"))
-            .find(|n| !self.creds.contains_key(n))
+            .find(|n| !taken(n))
             .unwrap()
     }
 }
