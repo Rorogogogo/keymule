@@ -89,7 +89,7 @@ pub fn run(dry_run: bool) -> Result<()> {
     if install_md(&md, dry_run)? {
         say(
             &format!("added keymule instructions to {}", md.display()),
-            &format!("append an keymule section to {}", md.display()),
+            &format!("add or refresh the keymule section in {}", md.display()),
         );
     } else {
         println!("· {} already mentions keymule", md.display());
