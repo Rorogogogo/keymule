@@ -123,10 +123,10 @@ up to `settings.json.keymule-bak`.
 
 | Command | What it does |
 |---|---|
-| `keymule add [service]` | Store a credential. Prompts for URL, username (if needed) and the secret |
-| `keymule list` | Show stored credentials (never secrets) |
+| `keymule add [service] [--dialog]` | Store a credential. Prompts for URL, username (if needed) and the secret; `--dialog` asks for the secret in the macOS dialog |
+| `keymule list [--json]` | Show stored credentials and adopted MCP servers (never secrets) |
 | `keymule edit <name> --url/--username/--service/--description` | Change metadata. A new host needs terminal confirmation |
-| `keymule rotate <name>` | Replace the secret after rotating it |
+| `keymule rotate <name> [--dialog]` | Replace the secret after rotating it |
 | `keymule test <name>` | Check the credential still works |
 | `keymule rm <name>` | Delete it (needs terminal confirmation) |
 | `keymule presets` | List service presets |
@@ -163,7 +163,7 @@ paste-to-save hook is Claude Code only for now.
 |---|---|
 | Secrets, with their allowed hosts, auth scheme and (for MCP servers) allowed commands | OS keychain (macOS Keychain, Windows Credential Manager, Secret Service), service `keymule` |
 | Readable index | `~/.config/keymule/credentials.toml`: names, URLs, descriptions. No secrets, and not trusted: if it disagrees with the keychain, the keychain wins and `keymule list` warns you |
-| Audit log | `~/.config/keymule/audit.log` |
+| Audit log | `~/.config/keymule/audit.log`: one line per request, and one when an adopted MCP server starts |
 
 On macOS, the keychain only hands keymule's items to keymule itself. Another process (say, an
 agent running `security find-generic-password`) triggers a system prompt you have to approve.

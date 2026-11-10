@@ -290,7 +290,7 @@ fn clip(text: &str, max_bytes: usize, keep_tail: bool) -> (String, bool) {
 }
 
 /// One line per request in ~/.config/keymule/audit.log. Best effort.
-fn audit(name: &str, method: &str, url: &str, status: u16) {
+pub fn audit(name: &str, method: &str, url: &str, status: u16) {
     let Ok(dir) = config_dir() else { return };
     let _ = std::fs::create_dir_all(&dir);
     let ts = SystemTime::now()

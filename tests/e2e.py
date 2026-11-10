@@ -243,6 +243,17 @@ h = subprocess.run([BIN, "hook", "prompt"], env=env, text=True, capture_output=T
                    input=json.dumps({"prompt": "check my bamboo pipeline"}))
 check("clean prompt passes through", h.returncode == 0 and h.stdout == "", h.stdout)
 
+# ---- CLI used by the Claude Code panel ---------------------------------------
+l = subprocess.run([BIN, "list", "--json"], env=env, text=True, capture_output=True)
+j = json.loads(l.stdout)
+b = [c for c in j["credentials"] if c["name"] == "bamboo"][0]
+check("list --json gives sealed hosts and no secrets",
+      b["hosts"] == [f"127.0.0.1:{port_a}"] and not b["file_edited"] and SECRET not in l.stdout, l.stdout)
+r = subprocess.run([BIN, "rotate", "pasted", "--dialog", "--no-verify"], text=True, capture_output=True,
+                   env=dict(env, KEYMULE_TEST_DIALOG="rotated-by-panel-456"))
+check("rotate --dialog takes the secret from the dialog",
+      r.returncode == 0 and vault_now().get("pasted") == "rotated-by-panel-456", r.stdout + r.stderr)
+
 # ---- adopt + exec, against a fake home -------------------------------------
 adopt_home = tempfile.mkdtemp()
 mcp_key = "mk_7Rq2Lx9Vt4Wp8Zn3Kc6Hb1Jd5Fs0Gy"

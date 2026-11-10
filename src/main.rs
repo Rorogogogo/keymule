@@ -49,9 +49,16 @@ enum Cmd {
         /// Skip checking the token against the service.
         #[arg(long)]
         no_verify: bool,
+        /// Ask for the secret in a macOS dialog instead of the terminal.
+        #[arg(long)]
+        dialog: bool,
     },
     /// List stored credentials (never shows secrets).
-    List,
+    List {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Change a credential's URL, username, service or description.
     Edit {
         name: String,
@@ -69,6 +76,9 @@ enum Cmd {
         name: String,
         #[arg(long)]
         no_verify: bool,
+        /// Ask for the new secret in a macOS dialog instead of the terminal.
+        #[arg(long)]
+        dialog: bool,
     },
     /// Check that a stored credential still works.
     Test { name: String },
@@ -148,8 +158,33 @@ async fn run(cli: Cli) -> Result<()> {
             header,
             description,
             no_verify,
+            dialog: true,
+        } => {
+            let msg = mcp::add_with_dialog(mcp::AddArgs {
+                service: service.unwrap_or_else(|| "generic".into()),
+                url,
+                name,
+                username,
+                header,
+                description,
+                verify: Some(!no_verify),
+            })
+            .await?;
+            println!("{msg}");
+            Ok(())
+        }
+        Cmd::Add {
+            service,
+            name,
+            url,
+            username,
+            header,
+            description,
+            no_verify,
+            dialog: false,
         } => add(service, name, url, username, header, description, no_verify).await,
-        Cmd::List => list(),
+        Cmd::List { json: false } => list(),
+        Cmd::List { json: true } => list_json(),
         Cmd::Edit {
             name,
             url,
@@ -157,7 +192,11 @@ async fn run(cli: Cli) -> Result<()> {
             service,
             description,
         } => edit(&name, url, username, service, description),
-        Cmd::Rotate { name, no_verify } => rotate(&name, no_verify).await,
+        Cmd::Rotate {
+            name,
+            no_verify,
+            dialog,
+        } => rotate(&name, no_verify, dialog).await,
         Cmd::Test { name } => test(&name).await,
         Cmd::Rm { name } => rm(&name),
         Cmd::Presets => {
@@ -314,6 +353,55 @@ fn list() -> Result<()> {
     Ok(())
 }
 
+/// `keymule list --json`, for the Claude Code panel and scripts. No secrets.
+fn list_json() -> Result<()> {
+    let store = Store::load()?;
+    let vault = store::vault();
+    let creds: Vec<_> = store
+        .creds
+        .iter()
+        .map(|(name, c)| {
+            let sealed = Sealed::load(vault.as_ref(), name, c).ok();
+            let used = sealed
+                .as_ref()
+                .map(|s| s.apply(c))
+                .unwrap_or_else(|| c.clone());
+            serde_json::json!({
+                "name": name,
+                "service": presets::get_or_generic(&c.service).title,
+                "url": c.url,
+                "hosts": used.hosts,
+                "auth": used.auth.label(),
+                "description": c.description,
+                "added_by": c.added_by,
+                "file_edited": sealed.as_ref().is_some_and(|s| s.differs_from(c)),
+                "missing_secret": sealed.is_none(),
+            })
+        })
+        .collect();
+    let servers: Vec<_> = store
+        .servers
+        .iter()
+        .map(|(name, s)| {
+            serde_json::json!({
+                "name": name,
+                "env": s.env,
+                "arg_secrets": s.arg_secrets,
+                "used_by": s.used_by,
+            })
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "credentials": creds,
+            "servers": servers,
+            "audit_log": store::config_dir()?.join("audit.log"),
+        }))?
+    );
+    Ok(())
+}
+
 fn edit(
     name: &str,
     url: Option<String>,
@@ -362,10 +450,19 @@ fn edit(
     Ok(())
 }
 
-async fn rotate(name: &str, no_verify: bool) -> Result<()> {
+async fn rotate(name: &str, no_verify: bool, dialog: bool) -> Result<()> {
     let store = Store::load()?;
     if store.servers.contains_key(name) && !store.creds.contains_key(name) {
-        return rotate_server(name);
+        return rotate_server(name, dialog);
+    }
+    if dialog {
+        let msg = mcp::rotate_with_dialog(mcp::RotateArgs {
+            name: name.into(),
+            verify: Some(!no_verify),
+        })
+        .await?;
+        println!("{msg}");
+        return Ok(());
     }
     let vault = store::vault();
     let mut sealed = Sealed::load(vault.as_ref(), name, store.get(name)?)?;
@@ -400,23 +497,34 @@ async fn test(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn rotate_server(name: &str) -> Result<()> {
+/// A new value for one of an adopted server's secrets, or None to keep it.
+fn ask_new(dialog: bool, server: &str, what: &str) -> Result<Option<String>> {
+    if !dialog {
+        return tty::secret_or_keep(&format!(
+            "New {what} for {server} (hidden, Enter keeps it): "
+        ));
+    }
+    match dialog::secret(&format!(
+        "Type the new {what} for the \"{server}\" MCP server.\n\nClick Cancel to keep the current one."
+    ))? {
+        dialog::Answer::Text(s) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
+        dialog::Answer::Text(_) | dialog::Answer::Cancelled => Ok(None),
+        dialog::Answer::TimedOut => bail!("the dialog timed out; nothing changed"),
+    }
+}
+
+fn rotate_server(name: &str, dialog: bool) -> Result<()> {
     let vault = store::vault();
     let mut binding = servers::Binding::load(vault.as_ref(), name)?;
     let mut changed = 0;
     for (var, value) in binding.env.iter_mut() {
-        if let Some(new) =
-            tty::secret_or_keep(&format!("New {var} for {name} (hidden, Enter keeps it): "))?
-        {
+        if let Some(new) = ask_new(dialog, name, var)? {
             *value = new;
             changed += 1;
         }
     }
     for (i, value) in binding.args.values_mut().enumerate() {
-        if let Some(new) = tty::secret_or_keep(&format!(
-            "New argument secret #{} for {name} (hidden, Enter keeps it): ",
-            i + 1
-        ))? {
+        if let Some(new) = ask_new(dialog, name, &format!("argument secret #{}", i + 1))? {
             *value = new;
             changed += 1;
         }

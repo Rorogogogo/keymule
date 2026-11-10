@@ -124,6 +124,16 @@ async fn check(
     }
 }
 
+/// Also used by `keymule add --dialog`.
+pub async fn add_with_dialog(a: AddArgs) -> anyhow::Result<String> {
+    add(a).await
+}
+
+/// Also used by `keymule rotate --dialog`.
+pub async fn rotate_with_dialog(a: RotateArgs) -> anyhow::Result<String> {
+    rotate(a).await
+}
+
 async fn add(a: AddArgs) -> anyhow::Result<String> {
     let store = Store::load()?;
     let preset = presets::find(&a.service).ok_or_else(|| {

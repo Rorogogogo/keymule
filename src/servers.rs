@@ -166,6 +166,7 @@ pub fn exec(vault: &dyn Vault, name: &str, argv: &[String]) -> Result<()> {
     let binding = Binding::load(vault, name)
         .with_context(|| format!("no adopted MCP server named \"{name}\""))?;
     let mut cmd = binding.command(name, argv)?;
+    crate::http::audit(name, "START", &argv.join(" "), 0);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
