@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>keymule</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="top">
+    <span class="brand">keymule</span>
+    <span class="sep" aria-hidden="true"></span>
+    <span id="meta" class="meta"></span>
+    <span class="grow"></span>
+    <span id="live" class="meta"></span>
+  </header>
+
+  <main class="main">
+    <section class="col">
+      <div id="banner"></div>
+
+      <div class="sh"><span class="label">Credentials<span id="ncreds" class="count"></span></span></div>
+      <div id="creds"></div>
+      <form id="add" class="row addrow" autocomplete="off">
+        <span class="mark none" aria-hidden="true"></span>
+        <select id="svc" class="field" aria-label="Service">
+          <option value="github">GitHub</option>
+          <option value="gitlab">GitLab</option>
+          <option value="bamboo">Bamboo</option>
+          <option value="jenkins">Jenkins</option>
+          <option value="generic">Any HTTP API</option>
+        </select>
+        <input id="url" class="field mono url" type="url" spellcheck="false" aria-label="Base URL">
+        <button class="btn" type="submit">Add…</button>
+      </form>
+      <div class="hint">You type the token into a keymule dialog, never into this page.</div>
+
+      <div class="sh"><span class="label">MCP servers<span id="nservers" class="count"></span></span></div>
+      <div id="servers"></div>
+
+      <div class="sh">
+        <span class="label">Leaks</span>
+        <button id="scan" class="btn ghost" type="button">Scan</button>
+      </div>
+      <div id="leaks"></div>
+    </section>
+
+    <section class="col side">
+      <div class="sh">
+        <span class="label">Activity</span>
+        <span id="filter"></span>
+      </div>
+      <div id="activity"></div>
+    </section>
+  </main>
+
+  <div id="toast" role="status" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

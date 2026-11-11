@@ -11,6 +11,7 @@ mod remote;
 mod servers;
 mod store;
 mod tty;
+mod ui;
 
 use std::io::Read;
 
@@ -132,6 +133,15 @@ enum Cmd {
         #[arg(long = "header", value_name = "HEADER")]
         headers: Vec<String>,
     },
+    /// Open keymule's local web page: credentials, MCP servers, activity, leaks.
+    Ui {
+        /// Print the address instead of opening a browser.
+        #[arg(long)]
+        no_open: bool,
+        /// Port on 127.0.0.1 (default: any free one).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+    },
     /// Register keymule with Claude Code (MCP server, paste hook, CLAUDE.md).
     Init {
         #[arg(long)]
@@ -250,6 +260,7 @@ async fn run(cli: Cli) -> Result<()> {
             rename,
             command,
         } => servers::exec(store::vault().as_ref(), &name, &rename, &command),
+        Cmd::Ui { no_open, port } => ui::run(!no_open, port),
         Cmd::Remote { name, url, headers } => {
             remote::run(store::vault().as_ref(), &name, &headers, &url).await
         }

@@ -36,6 +36,7 @@ Agent:  Build #482 failed in "Integration tests"…
 - 📒 **Audit log.** Every request is logged to `~/.config/keymule/audit.log` (without secrets).
 - 🧩 **Service presets.** Bamboo, GitHub (incl. Actions), GitLab, Jenkins, or any HTTP API. Presets know the auth scheme, how to verify a token, and give the agent an API cheat-sheet.
 - 🩺 **Leak doctor.** `keymule doctor` finds tokens that already leaked into agent transcripts, sit in plain text in agent configs, or are readable in `.env` files and shell history, so you know what to rotate.
+- 🖥 **Local web page.** `keymule ui` opens a page on your machine with your credentials, MCP servers, live activity and leak scan, with buttons that open keymule's dialogs.
 - 📦 **Adopt MCP secrets.** `keymule adopt` moves the API keys your MCP server configs keep in plain text into the keychain. The servers start the same way, through `keymule exec`. Remote (HTTP) servers whose API key sits in a header connect through `keymule remote`, which adds the header itself.
 
 ---
@@ -161,6 +162,7 @@ up to `settings.json.keymule-bak`.
 | `keymule adopt [--dry-run] [--yes] [--server NAME]` | Move plain-text MCP server secrets into the keychain |
 | `keymule exec <name> [--env VAR] -- <command…>` | Start an MCP server with its secrets (used in configs). New commands need your approval once |
 | `keymule remote <name> <url> [--header "Name: value"]` | Connect to a remote (HTTP) MCP server, adding the headers keymule holds (used in configs). New URLs need your approval once |
+| `keymule ui [--no-open] [--port N]` | Open the local web page (127.0.0.1 only, token in the link it opens) |
 | `keymule init` | Set up Claude Code |
 | `keymule mcp` | The MCP server (started by your agent) |
 | `keymule hook prompt` | The Claude Code `UserPromptSubmit` hook |
@@ -205,7 +207,8 @@ agent running `security find-generic-password`) triggers a system prompt you hav
 - HTTP APIs only. Database, SSH and cloud CLI credentials are on the roadmap.
 - The secure dialog is macOS-only for now; elsewhere use `keymule add` in a terminal.
 - The agent picks the URL in `add_credential`, so read the host in the dialog before typing your token.
-- Unsigned builds may make macOS ask for keychain access again after each rebuild.
+- Unsigned builds make macOS ask for keychain access again after each rebuild. Building from source on a Mac, `scripts/install-macos.sh` signs the binary with a local certificate so "Always Allow" sticks (setup steps are in the script).
+- `keymule ui` never sees a secret, but anything that can read your terminal output can open it with the link it prints.
 - `keymule remote` speaks Streamable HTTP, not the older SSE-only transport. Keys in a URL's query string aren't adopted.
 - `keymule adopt` skips project `.mcp.json` files (usually shared; use `${VAR}` there) and command lines with shell syntax.
 - `keymule exec` stops casual reveals and keeps keys out of files, but an agent that can run arbitrary code as you could still get at a server's environment (for example by changing the server's own code).
@@ -216,6 +219,7 @@ agent running `security find-generic-password`) triggers a system prompt you hav
 - **0.3**: ✅ `keymule adopt` and `keymule exec`
 - **0.4**: ✅ `add_mcp_secret`, approval for new server commands, pasted database URLs
 - **0.5**: ✅ `keymule remote` for HTTP MCP servers' key headers
+- **0.6**: ✅ `keymule ui`, a local web page
 - **Next**: more presets, database auth proxy, SSH agent, git/docker/AWS credential helpers
 - **Later**: Touch ID approval for sensitive credentials, short-lived credentials (AWS STS, GitHub App tokens)
 

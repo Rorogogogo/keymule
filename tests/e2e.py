@@ -436,5 +436,35 @@ got, err, code = bridge([BIN, "remote", "remote-new", murl], [INIT], {"KEYMULE_T
 check("after approving the URL once, the new remote server connects",
       got.get(1, {}).get("result", {}).get("serverInfo", {}).get("name") == "fake-remote", json.dumps(got) + err)
 
+# ---- keymule ui: local page, token-gated, no secrets --------------------------
+import re, time, urllib.request, urllib.error
+u = subprocess.Popen([BIN, "ui", "--no-open"], stdout=subprocess.PIPE, env=env, text=True)
+m = re.search(r"http://127\.0\.0\.1:(\d+)/#t=([0-9a-f]{32})", u.stdout.readline())
+port, tok = m.group(1), m.group(2)
+
+
+def ui_get(path, headers=None, data=None):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
+code, page = ui_get("/")
+check("ui serves its page", code == 200 and "app.js" in page, page[:200])
+check("ui refuses API calls without the token", ui_get("/api/state")[0] == 403)
+check("ui refuses another Host (DNS rebinding)",
+      ui_get("/api/state", {"X-Keymule-Token": tok, "Host": f"evil.example:{port}"})[0] == 421)
+check("ui refuses other origins",
+      ui_get("/api/plan", {"X-Keymule-Token": tok, "Origin": "http://evil.example"}, b"{}")[0] == 403)
+code, body = ui_get("/api/state", {"X-Keymule-Token": tok})
+check("ui state lists credentials and holds no secret",
+      code == 200 and '"bamboo"' in body and SECRET not in body, body[:300])
+code, body = ui_get("/api/rotate", {"X-Keymule-Token": tok}, b'{"name": "--help"}')
+check("ui won't pass a flag as a name", '"bad name"' in body, body)
+u.terminate()
+
 print(f"\n{'ALL PASSED' if not fails else f'{fails} FAILED'}")
 sys.exit(1 if fails else 0)
