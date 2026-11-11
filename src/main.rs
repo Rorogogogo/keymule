@@ -7,6 +7,7 @@ mod http;
 mod init;
 mod mcp;
 mod presets;
+mod remote;
 mod servers;
 mod store;
 mod tty;
@@ -120,6 +121,16 @@ enum Cmd {
         /// The server's command, exactly as adopted.
         #[arg(last = true, required = true)]
         command: Vec<String>,
+    },
+    /// Connect to a remote (HTTP) MCP server, adding the headers keymule
+    /// holds (used in agent configs, as a stdio server).
+    Remote {
+        name: String,
+        /// The server's URL, exactly as approved.
+        url: String,
+        /// An extra header that isn't secret, "Name: value" (repeatable).
+        #[arg(long = "header", value_name = "HEADER")]
+        headers: Vec<String>,
     },
     /// Register keymule with Claude Code (MCP server, paste hook, CLAUDE.md).
     Init {
@@ -239,6 +250,9 @@ async fn run(cli: Cli) -> Result<()> {
             rename,
             command,
         } => servers::exec(store::vault().as_ref(), &name, &rename, &command),
+        Cmd::Remote { name, url, headers } => {
+            remote::run(store::vault().as_ref(), &name, &headers, &url).await
+        }
         Cmd::Init { dry_run } => init::run(dry_run),
         Cmd::Mcp => mcp::serve().await,
         Cmd::Hook {
@@ -336,7 +350,13 @@ fn list() -> Result<()> {
         return Ok(());
     }
     for (name, s) in &store.servers {
-        let mut what = s.env.join(", ");
+        let mut what = s
+            .env
+            .iter()
+            .cloned()
+            .chain(s.headers.iter().map(|h| format!("{h} header")))
+            .collect::<Vec<_>>()
+            .join(", ");
         if s.arg_secrets > 0 {
             what = format!("{what} (+{} in arguments)", s.arg_secrets);
         }
@@ -401,6 +421,7 @@ fn list_json() -> Result<()> {
             serde_json::json!({
                 "name": name,
                 "env": s.env,
+                "headers": s.headers,
                 "arg_secrets": s.arg_secrets,
                 "used_by": s.used_by,
             })
@@ -535,6 +556,20 @@ fn rotate_server(name: &str, dialog: bool) -> Result<()> {
     for (var, value) in binding.env.iter_mut() {
         if let Some(new) = ask_new(dialog, name, var)? {
             *value = new;
+            changed += 1;
+        }
+    }
+    for (header, value) in binding.headers.iter_mut() {
+        if let Some(new) = ask_new(dialog, name, &format!("the {header} header"))? {
+            // Keep "Bearer " if the old value had it and the new one doesn't.
+            *value = match value.split_once(' ') {
+                Some((scheme, _))
+                    if !new.contains(' ') && scheme.eq_ignore_ascii_case("bearer") =>
+                {
+                    format!("{scheme} {new}")
+                }
+                _ => new,
+            };
             changed += 1;
         }
     }

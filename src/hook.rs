@@ -100,8 +100,7 @@ fn save_database(found: &detect::Found, store: &mut Store, vault: &dyn Vault) ->
         name.clone(),
         crate::store::ServerMeta {
             env: vec!["DATABASE_URL".into()],
-            arg_secrets: 0,
-            used_by: Vec::new(),
+            ..Default::default()
         },
     );
     if let Err(e) = store.save() {

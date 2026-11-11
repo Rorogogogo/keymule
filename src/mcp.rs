@@ -28,7 +28,10 @@ first if needed (URLs are not secret). If a token stops working (HTTP 401), offe
 rotate_credential. When you set up an MCP server that needs a password, API key or database URL, \
 never write the secret into the MCP config or ask for it in chat: call add_mcp_secret (the user \
 types it in a dialog), then configure the server to run `keymule exec <name> [--env VAR] -- \
-<server command>`. The user approves that command once, in a dialog, when it first starts.";
+<server command>`. For a remote (HTTP) MCP server that needs an API key header, call \
+add_mcp_secret with `header` instead of `env`, and configure it as a stdio server running \
+`keymule remote <name> <url>`. The user approves that command or URL once, in a dialog, when it \
+first starts.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddArgs {
@@ -76,8 +79,13 @@ pub struct ScanArgs {
 pub struct McpSecretArgs {
     /// Name to store it under, e.g. "pg-local". Letters, digits, '-' and '_'.
     pub name: String,
-    /// The env var the MCP server reads it from, e.g. "DATABASE_URI" or "NOTION_TOKEN".
-    pub env: String,
+    /// The env var a local MCP server reads it from, e.g. "DATABASE_URI" or "NOTION_TOKEN".
+    #[serde(default)]
+    pub env: Option<String>,
+    /// For a remote (HTTP) MCP server instead: the header that carries it,
+    /// e.g. "x-api-key" or "Authorization".
+    #[serde(default)]
+    pub header: Option<String>,
     /// What it is, shown in the dialog, e.g. "Postgres URL for the local dev database".
     #[serde(default)]
     pub description: Option<String>,
@@ -247,12 +255,37 @@ async fn rotate(a: RotateArgs) -> anyhow::Result<String> {
 
 async fn add_mcp_secret(a: McpSecretArgs) -> anyhow::Result<String> {
     validate_name(&a.name)?;
-    let env_ok = !a.env.is_empty()
-        && a.env.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !a.env.starts_with(|c: char| c.is_ascii_digit());
-    if !env_ok {
-        bail!("env must be a variable name like DATABASE_URI");
+    enum Slot {
+        Env(String),
+        Header(String),
     }
+    let slot = match (
+        a.env.as_deref().map(str::trim),
+        a.header.as_deref().map(str::trim),
+    ) {
+        (Some(env), None) => {
+            let ok = !env.is_empty()
+                && env.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !env.starts_with(|c: char| c.is_ascii_digit());
+            if !ok {
+                bail!("env must be a variable name like DATABASE_URI");
+            }
+            Slot::Env(env.to_string())
+        }
+        (None, Some(h)) => {
+            if reqwest::header::HeaderName::from_bytes(h.as_bytes()).is_err()
+                || crate::remote::RESERVED.contains(&h.to_ascii_lowercase().as_str())
+            {
+                bail!("header must be a header name like x-api-key or Authorization");
+            }
+            Slot::Header(h.to_string())
+        }
+        _ => bail!("give either env (local server) or header (remote server)"),
+    };
+    let needs = match &slot {
+        Slot::Env(v) => v.clone(),
+        Slot::Header(h) => format!("the {h} header"),
+    };
     let store = Store::load()?;
     if store.creds.contains_key(&a.name) || store.servers.contains_key(&a.name) {
         bail!("\"{}\" already exists; pick another name", a.name);
@@ -264,14 +297,30 @@ async fn add_mcp_secret(a: McpSecretArgs) -> anyhow::Result<String> {
         .unwrap_or_default();
     let value = ask_secret(format!(
         "Your agent is setting up an MCP server that needs {}{what}.\n\n\
-         Type the value here. keymule keeps it in the keychain, and only a server command you \
-         approve will get it.",
-        a.env
+         Type the value here. keymule keeps it in the keychain, and only a server you approve \
+         will get it.",
+        needs
     ))
     .await?;
 
     let mut binding = crate::servers::Binding::default();
-    binding.env.insert(a.env.clone(), value);
+    let mut meta = crate::store::ServerMeta::default();
+    match &slot {
+        Slot::Env(env) => {
+            binding.env.insert(env.clone(), value);
+            meta.env = vec![env.clone()];
+        }
+        Slot::Header(h) => {
+            // People type the token; Authorization wants "Bearer <token>".
+            let value = if h.eq_ignore_ascii_case("authorization") && !value.contains(' ') {
+                format!("Bearer {value}")
+            } else {
+                value
+            };
+            binding.headers.insert(h.clone(), value);
+            meta.headers = vec![h.clone()];
+        }
+    }
     let mut store = Store::load()?;
     if store.creds.contains_key(&a.name) || store.servers.contains_key(&a.name) {
         bail!(
@@ -280,22 +329,23 @@ async fn add_mcp_secret(a: McpSecretArgs) -> anyhow::Result<String> {
         );
     }
     binding.save(store::vault().as_ref(), &a.name)?;
-    store.servers.insert(
-        a.name.clone(),
-        crate::store::ServerMeta {
-            env: vec![a.env.clone()],
-            arg_secrets: 0,
-            used_by: Vec::new(),
-        },
-    );
+    store.servers.insert(a.name.clone(), meta);
     store.save()?;
     let exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "keymule".into());
+    if let Slot::Header(h) = &slot {
+        return Ok(format!(
+            "Saved \"{name}\". Configure the MCP server as a stdio server with command \"{exe}\" and args [\"remote\", \"{name}\", \"<the server's https URL>\"]. keymule connects to the URL and adds the {h} header. Do not put the value or that header in the config. The first time it connects, the user approves the URL in a dialog. Example: claude mcp add <server> -- \"{exe}\" remote {name} <url>",
+            name = a.name,
+        ));
+    }
+    let Slot::Env(env) = &slot else {
+        unreachable!()
+    };
     Ok(format!(
         "Saved \"{name}\". Configure the MCP server with command \"{exe}\" and args [\"exec\", \"{name}\", \"--\", <the server's command and args>]. keymule sets {env} for it. Do not put the value in the config. The first time the server starts, the user approves the command in a dialog. Example: claude mcp add <server> -- \"{exe}\" exec {name} -- <command> <args>",
         name = a.name,
-        env = a.env,
     ))
 }
 
@@ -450,10 +500,13 @@ impl Server {
                     "name": name,
                     "kind": "MCP server secret (not for http_request)",
                     "env": s.env,
+                    "headers": s.headers,
                     "used_by": s.used_by,
-                    "how_to_use": format!(
-                        "in an MCP server config: keymule exec {name} [--env VAR] -- <server command>"
-                    ),
+                    "how_to_use": if s.headers.is_empty() {
+                        format!("in an MCP server config: keymule exec {name} [--env VAR] -- <server command>")
+                    } else {
+                        format!("in an MCP server config, as a stdio server: keymule remote {name} <url>")
+                    },
                 })
             })
             .collect();
@@ -520,7 +573,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Store a secret an MCP server needs (database URL, API key, password) without it entering the chat or a config file. Opens a secure dialog where the user types it. Then configure the server to run `keymule exec <name> -- <server command>`; keymule passes the secret in the env var you name, and the user approves the command once when it first starts."
+        description = "Store a secret an MCP server needs (database URL, API key, password) without it entering the chat or a config file. Opens a secure dialog where the user types it. Then configure the server to run `keymule exec <name> -- <server command>`; keymule passes the secret in the env var you name, and the user approves the command once when it first starts. For a remote (HTTP) server, give `header` (e.g. x-api-key) instead of `env` and configure it as a stdio server running `keymule remote <name> <url>`."
     )]
     async fn add_mcp_secret(
         &self,

@@ -36,7 +36,7 @@ Agent:  Build #482 failed in "Integration tests"…
 - 📒 **Audit log.** Every request is logged to `~/.config/keymule/audit.log` (without secrets).
 - 🧩 **Service presets.** Bamboo, GitHub (incl. Actions), GitLab, Jenkins, or any HTTP API. Presets know the auth scheme, how to verify a token, and give the agent an API cheat-sheet.
 - 🩺 **Leak doctor.** `keymule doctor` finds tokens that already leaked into agent transcripts, sit in plain text in agent configs, or are readable in `.env` files and shell history, so you know what to rotate.
-- 📦 **Adopt MCP secrets.** `keymule adopt` moves the API keys your MCP server configs keep in plain text into the keychain. The servers start the same way, through `keymule exec`.
+- 📦 **Adopt MCP secrets.** `keymule adopt` moves the API keys your MCP server configs keep in plain text into the keychain. The servers start the same way, through `keymule exec`. Remote (HTTP) servers whose API key sits in a header connect through `keymule remote`, which adds the header itself.
 
 ---
 
@@ -97,6 +97,18 @@ keychain item. A command keymule hasn't seen (`keymule exec acme -- env`, or a c
 point at another program) only gets the key after you approve it in a dialog. `keymule rotate acme`
 stores a new value.
 
+Remote (HTTP) MCP servers with a key in their `headers` become a small local bridge:
+
+```text
+  before: {"type": "http", "url": "https://mcp.acme.dev/mcp", "headers": {"x-api-key": "ak_…"}}
+  after:  {"type": "stdio", "command": "~/.cargo/bin/keymule", "args": ["remote", "acme", "https://mcp.acme.dev/mcp"]}
+```
+
+`keymule remote` speaks MCP over stdio to your agent and Streamable HTTP to the server, adding the
+header to each request. It only sends it to the URLs you approved (https, or http on localhost),
+never follows redirects with it, and blanks the key out of anything the server sends back.
+Non-secret headers stay in the config as `--header="Name: value"`.
+
 ### New MCP servers, without the password ever reaching the chat
 
 > *add a postgres MCP for my dev database*
@@ -106,7 +118,9 @@ keymule's dialog, and the agent configures the server as
 `keymule exec pg-dev -- postgres-mcp --access-mode=restricted`. When it first starts, keymule shows
 you that command and asks whether it may have the secret. If you paste a database URL into chat
 by habit, the paste hook blocks it and saves it the same way (`keymule exec postgres --env
-DATABASE_URI -- …`).
+DATABASE_URI -- …`). For a remote server the agent calls
+`add_mcp_secret(name="acme", header="x-api-key")` and sets it up as `keymule remote acme <url>`;
+you approve the URL once, the first time it connects.
 
 ---
 
@@ -146,6 +160,7 @@ up to `settings.json.keymule-bak`.
 | `keymule doctor [--all] [--json] [--dir D]` | Find leaked and plain-text secrets |
 | `keymule adopt [--dry-run] [--yes] [--server NAME]` | Move plain-text MCP server secrets into the keychain |
 | `keymule exec <name> [--env VAR] -- <command…>` | Start an MCP server with its secrets (used in configs). New commands need your approval once |
+| `keymule remote <name> <url> [--header "Name: value"]` | Connect to a remote (HTTP) MCP server, adding the headers keymule holds (used in configs). New URLs need your approval once |
 | `keymule init` | Set up Claude Code |
 | `keymule mcp` | The MCP server (started by your agent) |
 | `keymule hook prompt` | The Claude Code `UserPromptSubmit` hook |
@@ -159,7 +174,7 @@ up to `settings.json.keymule-bak`.
 | `add_credential` | Opens a secure dialog for the user to type the secret; verifies and stores it |
 | `rotate_credential` | Same dialog, for a new token on an existing credential |
 | `update_credential` | Change URL, username or description; a new host needs the user's approval in a dialog |
-| `add_mcp_secret` | Store a secret an MCP server needs (database URL, API key) via the dialog, for `keymule exec` |
+| `add_mcp_secret` | Store a secret an MCP server needs (database URL, API key, header) via the dialog, for `keymule exec` or `keymule remote` |
 | `scan_for_leaks` | Run the doctor and return masked results |
 
 The secret never travels through the MCP connection. There is no tool that takes or returns one.
@@ -191,15 +206,18 @@ agent running `security find-generic-password`) triggers a system prompt you hav
 - The secure dialog is macOS-only for now; elsewhere use `keymule add` in a terminal.
 - The agent picks the URL in `add_credential`, so read the host in the dialog before typing your token.
 - Unsigned builds may make macOS ask for keychain access again after each rebuild.
-- `keymule adopt` skips HTTP MCP servers (secret headers), project `.mcp.json` files (usually shared; use `${VAR}` there) and command lines with shell syntax.
+- `keymule remote` speaks Streamable HTTP, not the older SSE-only transport. Keys in a URL's query string aren't adopted.
+- `keymule adopt` skips project `.mcp.json` files (usually shared; use `${VAR}` there) and command lines with shell syntax.
 - `keymule exec` stops casual reveals and keeps keys out of files, but an agent that can run arbitrary code as you could still get at a server's environment (for example by changing the server's own code).
 
 ## 🗺 Roadmap
 
 - **0.2**: ✅ `keymule doctor`
-- **0.3**: ✅ `keymule adopt` and `keymule exec`. Next: secret headers for HTTP MCP servers, more presets
-- **0.4**: database auth proxy, SSH agent, git/docker/AWS credential helpers
-- **0.5**: Touch ID approval for sensitive credentials, short-lived credentials (AWS STS, GitHub App tokens)
+- **0.3**: ✅ `keymule adopt` and `keymule exec`
+- **0.4**: ✅ `add_mcp_secret`, approval for new server commands, pasted database URLs
+- **0.5**: ✅ `keymule remote` for HTTP MCP servers' key headers
+- **Next**: more presets, database auth proxy, SSH agent, git/docker/AWS credential helpers
+- **Later**: Touch ID approval for sensitive credentials, short-lived credentials (AWS STS, GitHub App tokens)
 
 ## 📄 License
 

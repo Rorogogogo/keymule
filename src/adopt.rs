@@ -1,6 +1,8 @@
 //! `keymule adopt`: move secrets that MCP server entries keep in plain text
 //! (env vars, inline `VAR=value` commands, arguments) into the keychain, and
 //! rewrite each entry to `keymule exec <name> -- <its original command>`.
+//! Remote (HTTP) servers whose headers hold a key become
+//! `keymule remote <name> <url>`, a local bridge that adds the headers.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -55,6 +57,11 @@ pub struct Target {
     /// The env object to leave in the config (non-secret vars).
     keep_env: Map<String, Value>,
     had_env: bool,
+    /// For a remote server: its URL, the headers keymule takes over, and the
+    /// rest ("Name: value"), which stay in the config as `--header` args.
+    url: Option<String>,
+    secret_headers: BTreeMap<String, String>,
+    keep_headers: Vec<String>,
     pub binding: String,
 }
 
@@ -215,17 +222,8 @@ fn analyze(server: &Value, force: bool) -> Analysis {
         .iter()
         .any(|(k, v)| v.as_str().is_some_and(|v| is_secret(k, v)));
 
-    if obj.get("url").is_some() {
-        let headers = obj.get("headers").and_then(Value::as_object);
-        let secret_header = headers.is_some_and(|h| {
-            h.iter()
-                .any(|(k, v)| v.as_str().is_some_and(|v| is_secret_header(k, v)))
-        });
-        return if secret_header || has_secret_env {
-            Analysis::Skip("HTTP server: keymule can't hold its headers yet")
-        } else {
-            Analysis::Nothing
-        };
+    if let Some(url) = obj.get("url") {
+        return analyze_remote(obj, url.as_str().unwrap_or(""), has_secret_env, force);
     }
 
     let Some(command) = obj.get("command").and_then(Value::as_str) else {
@@ -317,16 +315,99 @@ fn analyze(server: &Value, force: bool) -> Analysis {
         arg_secrets,
         keep_env,
         had_env: obj.contains_key("env"),
+        url: None,
+        secret_headers: BTreeMap::new(),
+        keep_headers: Vec::new(),
         binding: String::new(),
     }))
 }
 
-fn is_secret_header(key: &str, value: &str) -> bool {
+/// Header keys an entry may use: Claude Code and Cursor say `headers`,
+/// Codex `http_headers`.
+const HEADER_KEYS: [&str; 2] = ["headers", "http_headers"];
+
+fn analyze_remote(
+    obj: &Map<String, Value>,
+    url: &str,
+    has_secret_env: bool,
+    force: bool,
+) -> Analysis {
+    let mut secret_headers = BTreeMap::new();
+    let mut keep_headers = Vec::new();
+    for key in HEADER_KEYS {
+        let Some(headers) = obj.get(key).and_then(Value::as_object) else {
+            continue;
+        };
+        for (k, v) in headers {
+            let Some(v) = v.as_str() else {
+                return Analysis::Nothing;
+            };
+            let forced =
+                force && !v.trim().is_empty() && !v.contains("${") && secret_header_name(k);
+            if is_secret_header(k, v) || forced {
+                secret_headers.insert(k.clone(), v.trim().to_string());
+            } else {
+                keep_headers.push(format!("{k}: {v}"));
+            }
+        }
+    }
+    if secret_headers.is_empty() {
+        return if has_secret_env {
+            Analysis::Skip(
+                "HTTP server with a secret in env, which a remote server doesn't read: remove it",
+            )
+        } else {
+            Analysis::Nothing
+        };
+    }
+    if url.contains("${") || !crate::remote::url_ok(url) {
+        return Analysis::Skip(
+            "keymule only sends headers to a fixed https URL (or http on localhost)",
+        );
+    }
+    if secret_headers.keys().chain(keep_headers.iter()).any(|h| {
+        crate::remote::RESERVED.contains(
+            &h.split(':')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+        )
+    }) {
+        return Analysis::Skip("it sets a header keymule manages itself");
+    }
+    Analysis::Adopt(Box::new(Target {
+        config: 0,
+        keys: Vec::new(),
+        place: String::new(),
+        argv: Vec::new(),
+        secret_env: BTreeMap::new(),
+        arg_secrets: BTreeMap::new(),
+        keep_env: Map::new(),
+        had_env: false,
+        url: Some(url.to_string()),
+        secret_headers,
+        keep_headers,
+        binding: String::new(),
+    }))
+}
+
+fn secret_header_name(key: &str) -> bool {
     let k = key.to_ascii_lowercase();
+    k == "authorization"
+        || k.contains("key")
+        || k.contains("token")
+        || k.contains("secret")
+        || is_secret_name(key)
+}
+
+fn is_secret_header(key: &str, value: &str) -> bool {
+    if value.contains("${") {
+        return false;
+    }
     let v = value.trim().trim_start_matches("Bearer ").trim();
-    ((k == "authorization" || k.contains("key") || k.contains("token") || is_secret_name(key))
-        && detect::plausible_value(v))
-        || !detect::scan_deep(value).is_empty()
+    (secret_header_name(key) && detect::plausible_value(v)) || !detect::scan_deep(value).is_empty()
 }
 
 fn is_env_name(s: &str) -> bool {
@@ -344,7 +425,7 @@ fn is_keymule_exec(obj: &Map<String, Value>, args: &[String]) -> bool {
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_default();
     (program == "keymule" || program == "keymule.exe")
-        && args.first().map(String::as_str) == Some("exec")
+        && matches!(args.first().map(String::as_str), Some("exec" | "remote"))
 }
 
 // ---- planning ---------------------------------------------------------------
@@ -450,12 +531,16 @@ pub fn plan(opts: &Options, store: &Store, vault: &dyn Vault) -> Result<Plan> {
                 Some(_) => continue,
                 None => Binding {
                     env: t.secret_env.clone(),
+                    headers: t.secret_headers.clone(),
                     ..Default::default()
                 },
             };
             validate_name(&name)?;
             b.args.extend(t.arg_secrets.clone());
-            b.allow(&t.argv);
+            match &t.url {
+                Some(url) => b.allow_url(url),
+                None => b.allow(&t.argv),
+            }
             bindings.insert(name.clone(), b);
             t.binding = name;
             break;
@@ -473,6 +558,7 @@ pub fn plan(opts: &Options, store: &Store, vault: &dyn Vault) -> Result<Plan> {
 
 fn fits(b: &Binding, t: &Target) -> bool {
     b.env == t.secret_env
+        && b.headers == t.secret_headers
         && t.arg_secrets
             .iter()
             .all(|(ph, v)| b.args.get(ph).is_none_or(|old| old == v))
@@ -482,6 +568,13 @@ fn fits(b: &Binding, t: &Target) -> bool {
 
 impl Plan {
     fn new_args(&self, t: &Target) -> Vec<String> {
+        if let Some(url) = &t.url {
+            return ["remote", &t.binding, url]
+                .into_iter()
+                .map(String::from)
+                .chain(t.keep_headers.iter().map(|h| format!("--header={h}")))
+                .collect();
+        }
         ["exec", &t.binding, "--"]
             .into_iter()
             .map(String::from)
@@ -518,6 +611,11 @@ impl Plan {
                     .secret_env
                     .iter()
                     .map(|(k, v)| format!("{k}={}", mask(v)))
+                    .chain(
+                        t.secret_headers
+                            .iter()
+                            .map(|(k, v)| format!("{k}: {}", mask_header(v))),
+                    )
                     .collect();
                 if !t.arg_secrets.is_empty() {
                     let n = t.arg_secrets.len();
@@ -528,13 +626,25 @@ impl Plan {
                     out.push_str(&format!("      {}\n", t.place));
                 }
             }
-            let t = &self.targets[0];
-            out.push_str(&format!(
-                "\nEach entry will start the same command through keymule, which adds the secrets. For example:\n  before: {}\n  after:  {} {}\n",
-                t.argv.join(" "),
-                self.exe,
-                self.new_args(t).join(" ")
-            ));
+            if let Some(t) = self.targets.iter().find(|t| t.url.is_none()) {
+                out.push_str(&format!(
+                    "\nEach entry will start the same command through keymule, which adds the secrets. For example:\n  before: {}\n  after:  {} {}\n",
+                    t.argv.join(" "),
+                    self.exe,
+                    self.new_args(t).join(" ")
+                ));
+            }
+            if let Some(t) = self.targets.iter().find(|t| t.url.is_some()) {
+                let names: Vec<&str> = t.secret_headers.keys().map(String::as_str).collect();
+                out.push_str(&format!(
+                    "\nRemote servers will connect through keymule, which adds the {} header{}. For example:\n  before: {} (headers in the config)\n  after:  {} {}\n",
+                    names.join(", "),
+                    if names.len() == 1 { "" } else { "s" },
+                    t.url.as_deref().unwrap_or_default(),
+                    self.exe,
+                    self.new_args(t).join(" ")
+                ));
+            }
         }
         if !self.skipped.is_empty() {
             out.push_str("\nNot adopted:\n");
@@ -585,6 +695,7 @@ pub fn apply(plan: &Plan, store: &mut Store, vault: &dyn Vault, home: &Path) -> 
         let b = &plan.bindings[&t.binding];
         meta.env = b.env.keys().cloned().collect();
         meta.arg_secrets = b.args.len();
+        meta.headers = b.headers.keys().cloned().collect();
         if !meta.used_by.contains(&t.place) {
             meta.used_by.push(t.place.clone());
         }
@@ -627,6 +738,15 @@ fn rewrite_json(text: &str, targets: &[&Target], plan: &Plan) -> Result<String> 
         let Some(obj) = obj.as_object_mut() else {
             bail!("{} is not an object", t.place);
         };
+        if t.url.is_some() {
+            obj.remove("url");
+            for k in HEADER_KEYS {
+                obj.remove(k);
+            }
+            if obj.contains_key("type") {
+                obj.insert("type".into(), Value::String("stdio".into()));
+            }
+        }
         obj.insert("command".into(), Value::String(plan.exe.clone()));
         obj.insert(
             "args".into(),
@@ -655,6 +775,12 @@ fn rewrite_toml(text: &str, targets: &[&Target], plan: &Plan) -> Result<String> 
         let Some(table) = item.as_table_like_mut() else {
             bail!("{} is not a table", t.place);
         };
+        if t.url.is_some() {
+            table.remove("url");
+            for k in HEADER_KEYS {
+                table.remove(k);
+            }
+        }
         table.insert("command", toml_edit::value(plan.exe.clone()));
         let args: toml_edit::Array = plan.new_args(t).into_iter().collect();
         table.insert("args", toml_edit::value(args));
@@ -670,6 +796,14 @@ fn rewrite_toml(text: &str, targets: &[&Target], plan: &Plan) -> Result<String> 
         }
     }
     Ok(doc.to_string())
+}
+
+/// `Bearer abc…` → `Bearer ab…yz`-style, keeping the scheme readable.
+fn mask_header(v: &str) -> String {
+    match v.split_once(' ') {
+        Some((scheme, token)) if !token.contains(' ') => format!("{scheme} {}", mask(token)),
+        _ => mask(v),
+    }
 }
 
 fn backup_path(path: &Path) -> PathBuf {
@@ -723,7 +857,8 @@ mod tests {
                 "db": {"type": "stdio", "command": "postgres-mcp", "args": ["--access-mode=unrestricted"],
                        "env": {"DATABASE_URI": DB}},
                 "remote": {"type": "http", "url": "https://x.example.com/mcp",
-                           "headers": {"x-api-key": "k_8Hq2Vn5Rx7Lm3Pz9Tc4Wb6Yd1"}},
+                           "headers": {"x-api-key": "k_8Hq2Vn5Rx7Lm3Pz9Tc4Wb6Yd1", "X-Client": "test"}},
+                "open": {"type": "http", "url": "https://open.example.com/mcp"},
                 "plain": {"type": "stdio", "command": "npx", "args": ["-y", "plain-mcp"], "env": {}}
             },
             "projects": {
@@ -744,7 +879,7 @@ mod tests {
         std::fs::write(
             home.join(".codex/config.toml"),
             format!(
-                "# my codex config\nmodel = \"x\"\n\n[mcp_servers.acme]\ncommand = \"npx\"\nargs = [\"-y\", \"acme-mcp\"]\n\n[mcp_servers.acme.env]\nACME_API_KEY = \"{KEY}\"\n"
+                "# my codex config\nmodel = \"x\"\n\n[mcp_servers.acme]\ncommand = \"npx\"\nargs = [\"-y\", \"acme-mcp\"]\n\n[mcp_servers.acme.env]\nACME_API_KEY = \"{KEY}\"\n\n[mcp_servers.docs]\nurl = \"https://docs.example.com/mcp\"\nhttp_headers = {{ Authorization = \"Bearer tok_4Rv8Qm2Lx7Wn3Kp9Zt6Hc1\" }}\n"
             ),
         )
         .unwrap();
@@ -777,19 +912,26 @@ mod tests {
                 "~/.claude.json · project /work/a: acme → acme",
                 "~/.claude.json · project /work/b: acme → acme",
                 "~/.claude.json · project /work/c: notes → notes",
+                "~/.claude.json · remote → remote",
                 "~/.codex/config.toml · acme → acme",
+                "~/.codex/config.toml · docs → docs",
             ]
         );
-        assert_eq!(plan.skipped.len(), 1, "{:?}", plan.skipped);
-        assert!(plan.skipped[0].place.ends_with("remote"));
+        assert!(plan.skipped.is_empty(), "{:?}", plan.skipped);
         let text = plan.render();
         assert!(
-            !text.contains(KEY) && !text.contains("Vq7Lp2Xk9Rt4"),
+            !text.contains(KEY)
+                && !text.contains("Vq7Lp2Xk9Rt4")
+                && !text.contains("8Hq2Vn5Rx7Lm3Pz9"),
+            "{text}"
+        );
+        assert!(
+            text.contains("remote remote https://x.example.com/mcp"),
             "{text}"
         );
 
         let applied = apply(&plan, &mut store, &vault, &opts.home).unwrap();
-        assert_eq!(applied.bindings, ["acme", "db", "notes"]);
+        assert_eq!(applied.bindings, ["acme", "db", "docs", "notes", "remote"]);
         assert_eq!(applied.backups.len(), 2);
 
         let claude = std::fs::read_to_string(opts.home.join(".claude.json")).unwrap();
@@ -812,6 +954,20 @@ mod tests {
         );
         assert_eq!(notes["env"], serde_json::json!({"NOTES_PAGE": "a1b2c3"}));
         assert_eq!(v["mcpServers"]["plain"]["command"], "npx");
+        let remote = &v["mcpServers"]["remote"];
+        assert_eq!(
+            remote,
+            &serde_json::json!({"type": "stdio", "command": "/bin/keymule",
+                "args": ["remote", "remote", "https://x.example.com/mcp", "--header=X-Client: test"]})
+        );
+        assert_eq!(
+            v["mcpServers"]["open"]["url"],
+            "https://open.example.com/mcp"
+        );
+        let b = Binding::load(&vault, "remote").unwrap();
+        assert_eq!(b.headers["x-api-key"], "k_8Hq2Vn5Rx7Lm3Pz9Tc4Wb6Yd1");
+        assert_eq!(b.urls, ["https://x.example.com/mcp"]);
+        assert_eq!(store.servers["remote"].headers, ["x-api-key"]);
         assert_eq!(v["numStartups"], 3);
 
         let codex = std::fs::read_to_string(opts.home.join(".codex/config.toml")).unwrap();
@@ -824,6 +980,16 @@ mod tests {
             "{codex}"
         );
         assert!(codex.contains(r#"args = ["exec", "acme", "--", "npx", "-y", "acme-mcp"]"#));
+        assert!(
+            !codex.contains("tok_4Rv8")
+                && !codex.contains("docs.example.com/mcp\"\nhttp")
+                && codex.contains(r#"args = ["remote", "docs", "https://docs.example.com/mcp"]"#),
+            "{codex}"
+        );
+        assert_eq!(
+            Binding::load(&vault, "docs").unwrap().headers["Authorization"],
+            "Bearer tok_4Rv8Qm2Lx7Wn3Kp9Zt6Hc1"
+        );
 
         let acme = Binding::load(&vault, "acme").unwrap();
         assert_eq!(acme.env["ACME_API_KEY"], KEY);
@@ -854,7 +1020,7 @@ mod tests {
         let mut names: Vec<_> = plan.targets.iter().map(|t| t.binding.as_str()).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names, ["acme", "acme-2", "db", "notes"]);
+        assert_eq!(names, ["acme", "acme-2", "db", "docs", "notes", "remote"]);
     }
 
     #[test]

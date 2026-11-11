@@ -59,6 +59,9 @@ pub struct ServerMeta {
     /// Number of secrets keymule puts into arguments.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub arg_secrets: usize,
+    /// HTTP headers keymule adds, for a remote server (names only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<String>,
     /// Config entries that run it, e.g. "~/.claude.json · acme".
     #[serde(default)]
     pub used_by: Vec<String>,

@@ -53,6 +53,12 @@ pub struct Binding {
     /// changed PATH can't swap in a different program.
     #[serde(default)]
     pub programs: BTreeMap<String, String>,
+    /// HTTP header → value, for remote (HTTP) MCP servers.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// URLs allowed to receive the headers (see `keymule remote`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub urls: Vec<String>,
 }
 
 impl Binding {
@@ -72,7 +78,17 @@ impl Binding {
 
     /// Every secret value it holds.
     pub fn secrets(&self) -> impl Iterator<Item = &String> {
-        self.env.values().chain(self.args.values())
+        self.env
+            .values()
+            .chain(self.args.values())
+            .chain(self.headers.values())
+    }
+
+    /// Allow the headers to be sent to `url` too.
+    pub fn allow_url(&mut self, url: &str) {
+        if !self.urls.iter().any(|u| u == url) {
+            self.urls.push(url.to_string());
+        }
     }
 
     /// Allow `argv` too, pinning its program's current location.
@@ -146,6 +162,22 @@ fn approve(name: &str, binding: &Binding, argv: &[String]) -> Result<()> {
             "you didn't allow `{}` to use \"{name}\"; it was not started",
             argv.join(" ")
         );
+    }
+    Ok(())
+}
+
+/// Ask the user whether `url` may receive `name`'s headers.
+pub fn approve_url(name: &str, binding: &Binding, url: &str) -> Result<()> {
+    let headers: Vec<&str> = binding.headers.keys().map(String::as_str).collect();
+    let allowed = crate::dialog::confirm(&format!(
+        "A remote MCP server wants your keymule secret \"{name}\" ({} header).\n\n\
+         It would be sent to:\n\n        {url}\n\n\
+         Only allow this if you set up this server.",
+        headers.join(", ")
+    ))
+    .context("keymule needs to ask you about a new URL, but can't show a dialog here")?;
+    if !allowed {
+        bail!("you didn't allow {url} to get \"{name}\"; nothing was sent");
     }
     Ok(())
 }

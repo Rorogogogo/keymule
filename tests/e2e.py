@@ -314,5 +314,127 @@ r = subprocess.run([BIN, "exec", "pg-dev", "--env", "DATABASE_URL", "--"] + prob
 check("exec --env renames a single-value secret",
       r.stdout.strip() == f"uri=0 url={len(db_url)}", r.stdout + r.stderr)
 
+# ---- keymule remote: a remote (HTTP) MCP server's key header ----------------
+RKEY = "rk_5Tq8Wn2Lx7Vm4Kp9Zc3Hd6Bf1"
+mseen = []  # (method, x-api-key, session, protocol)
+
+
+class Remote(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def reply(self, code, body=b"", ctype="application/json", extra=()):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        for k, v in extra:
+            self.send_header(k, v)
+        if ctype != "text/event-stream":
+            self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        self.reply(405)
+
+    def do_DELETE(self):
+        mseen.append(("DELETE", self.headers.get("x-api-key"), self.headers.get("mcp-session-id"), None))
+        self.reply(200)
+
+    def do_POST(self):
+        msg = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        key = self.headers.get("x-api-key")
+        mseen.append((msg.get("method"), key, self.headers.get("mcp-session-id"),
+                      self.headers.get("mcp-protocol-version")))
+        if key != RKEY:
+            return self.reply(401, b'{"error":"bad key"}')
+        method, mid = msg.get("method"), msg.get("id")
+        if mid is None:
+            return self.reply(202)
+        if method == "initialize":
+            res = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                   "serverInfo": {"name": "fake-remote", "version": "1"}}
+            body = json.dumps({"jsonrpc": "2.0", "id": mid, "result": res}).encode()
+            return self.reply(200, body, extra=[("Mcp-Session-Id", "sess-42")])
+        if method == "tools/list":
+            ev = {"jsonrpc": "2.0", "id": mid, "result": {"tools": [{"name": "whoami", "inputSchema": {"type": "object"}}]}}
+            body = ("event: message\ndata: " + json.dumps(ev) + "\n\n").encode()
+            return self.reply(200, body, ctype="text/event-stream")
+        # tools/call: a careless server that echoes the key back
+        ev = {"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": f"key is {key}"}]}}
+        self.reply(200, json.dumps(ev).encode())
+
+
+srv_m = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Remote)
+threading.Thread(target=srv_m.serve_forever, daemon=True).start()
+murl = f"http://127.0.0.1:{srv_m.server_address[1]}/mcp"
+
+rhome = tempfile.mkdtemp()
+with open(os.path.join(rhome, ".claude.json"), "w") as f:
+    json.dump({"mcpServers": {"remote-tools": {"type": "http", "url": murl,
+                                               "headers": {"x-api-key": RKEY, "X-Team": "core"}}}}, f)
+renv = dict(env, HOME=rhome)
+a = subprocess.run([BIN, "adopt", "--yes"], env=renv, text=True, capture_output=True, cwd=rhome)
+rcfg = json.load(open(os.path.join(rhome, ".claude.json")))["mcpServers"]["remote-tools"]
+check("adopt turns a remote server's key header into `keymule remote`",
+      a.returncode == 0 and RKEY not in json.dumps(rcfg) and rcfg.get("type") == "stdio"
+      and rcfg["args"] == ["remote", "remote-tools", murl, "--header=X-Team: core"] and "url" not in rcfg,
+      a.stdout + a.stderr + json.dumps(rcfg))
+
+
+def bridge(argv, msgs, extra_env=None):
+    """Run a bridge, send JSON-RPC messages, return replies by id."""
+    b = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         env=dict(renv, **(extra_env or {})), text=True)
+    got = {}
+    for m in msgs:
+        b.stdin.write(json.dumps(m) + "\n")
+        b.stdin.flush()
+        if "id" in m:
+            while True:
+                line = b.stdout.readline()
+                if not line:
+                    break
+                r = json.loads(line)
+                got[r.get("id")] = r
+                if r.get("id") == m["id"]:
+                    break
+    b.stdin.close()
+    b.wait(timeout=10)
+    return got, b.stderr.read(), b.returncode
+
+
+INIT = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}}}
+msgs = [INIT, {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "whoami", "arguments": {}}}]
+got, err, code = bridge([rcfg["command"]] + rcfg["args"], msgs)
+text = json.dumps(got)
+check("the bridge talks to the remote server with the key (JSON and SSE replies)",
+      got.get(1, {}).get("result", {}).get("serverInfo", {}).get("name") == "fake-remote"
+      and got.get(2, {}).get("result", {}).get("tools", [{}])[0].get("name") == "whoami", text + err)
+check("it keeps the session and protocol version, and closes the session",
+      [m for m in mseen if m[0] == "tools/list"][0][2:] == ("sess-42", "2025-06-18")
+      and any(m[0] == "DELETE" and m[2] == "sess-42" for m in mseen), str(mseen))
+check("a key the server echoes back is hidden from the agent",
+      RKEY not in text and "[hidden by keymule]" in text, text)
+
+before = len(mseen)
+evil = murl.replace("/mcp", "/elsewhere")
+got, err, code = bridge([BIN, "remote", "remote-tools", evil], [INIT], {"KEYMULE_TEST_DIALOG": "deny"})
+check("a URL the user doesn't approve gets nothing",
+      code != 0 and "didn't allow" in err and len(mseen) == before, err + str(mseen[before:]))
+
+session(KEYMULE_TEST_DIALOG=RKEY)
+err, out = call("add_mcp_secret", {"name": "remote-new", "header": "x-api-key"})
+check("add_mcp_secret with a header sets up `keymule remote`",
+      not err and "remote remote-new" in out and RKEY not in out
+      and RKEY in vault_now().get("mcp:remote-new", ""), out)
+p.stdin.close()
+p.wait(timeout=5)
+got, err, code = bridge([BIN, "remote", "remote-new", murl], [INIT], {"KEYMULE_TEST_DIALOG": "allow"})
+check("after approving the URL once, the new remote server connects",
+      got.get(1, {}).get("result", {}).get("serverInfo", {}).get("name") == "fake-remote", json.dumps(got) + err)
+
 print(f"\n{'ALL PASSED' if not fails else f'{fails} FAILED'}")
 sys.exit(1 if fails else 0)
