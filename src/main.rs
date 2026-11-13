@@ -82,6 +82,9 @@ enum Cmd {
         #[arg(long)]
         dialog: bool,
     },
+    /// Show a stored secret in a macOS window. It is never printed, so an
+    /// agent that runs this can't read it.
+    Reveal { name: String },
     /// Check that a stored credential still works.
     Test { name: String },
     /// Delete a credential and its secret.
@@ -225,6 +228,7 @@ async fn run(cli: Cli) -> Result<()> {
             no_verify,
             dialog,
         } => rotate(&name, no_verify, dialog).await,
+        Cmd::Reveal { name } => reveal(&name),
         Cmd::Test { name } => test(&name).await,
         Cmd::Rm { name } => rm(&name),
         Cmd::Presets => {
@@ -528,6 +532,55 @@ async fn rotate(name: &str, no_verify: bool, dialog: bool) -> Result<()> {
     sealed.secret = secret;
     sealed.save(vault.as_ref(), name)?;
     println!("Rotated \"{name}\". Revoke the old token at the service if you haven't.");
+    Ok(())
+}
+
+/// Show a credential's or an MCP server's secret in a keymule window. The
+/// value never goes to stdout, where an agent running this would see it.
+fn reveal(name: &str) -> Result<()> {
+    let store = Store::load()?;
+    let vault = store::vault();
+    let (items, copy): (Vec<(String, String)>, Option<String>) =
+        if let Some(c) = store.creds.get(name) {
+            let sealed = Sealed::load(vault.as_ref(), name, c)?;
+            let mut items = Vec::new();
+            if let Auth::Basic { username } = &sealed.auth {
+                items.push(("Username".to_string(), username.clone()));
+            }
+            items.push(("Secret".to_string(), sealed.secret.clone()));
+            (items, Some(sealed.secret))
+        } else if store.servers.contains_key(name) {
+            let b = servers::Binding::load(vault.as_ref(), name)?;
+            let items: Vec<(String, String)> = b
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .chain(
+                    b.headers
+                        .iter()
+                        .map(|(k, v)| (format!("{k} header"), v.clone())),
+                )
+                .chain(
+                    b.args
+                        .values()
+                        .enumerate()
+                        .map(|(i, v)| (format!("Argument secret #{}", i + 1), v.clone())),
+                )
+                .collect();
+            let copy = (items.len() == 1).then(|| items[0].1.clone());
+            (items, copy)
+        } else {
+            bail!("keymule has no credential or MCP server named \"{name}\"");
+        };
+    if items.is_empty() {
+        bail!("\"{name}\" holds no secret");
+    }
+    if dialog::reveal(name, &items, copy.as_deref())? {
+        http::audit(name, "REVEAL", "", 0);
+        println!("Showed \"{name}\" in a keymule window. The value isn't printed here.");
+    } else {
+        println!("Not shown.");
+    }
     Ok(())
 }
 

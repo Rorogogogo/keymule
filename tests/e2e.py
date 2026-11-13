@@ -436,6 +436,19 @@ got, err, code = bridge([BIN, "remote", "remote-new", murl], [INIT], {"KEYMULE_T
 check("after approving the URL once, the new remote server connects",
       got.get(1, {}).get("result", {}).get("serverInfo", {}).get("name") == "fake-remote", json.dumps(got) + err)
 
+# ---- keymule reveal: shown in a dialog, never printed -------------------------
+rlog = os.path.join(home, "reveal.log")
+r = subprocess.run([BIN, "reveal", "bamboo"], text=True, capture_output=True,
+                   env=dict(env, KEYMULE_TEST_DIALOG="deny", KEYMULE_TEST_DIALOG_LOG=rlog))
+check("reveal asks first and shows nothing when refused",
+      r.returncode == 0 and "Not shown" in r.stdout and SECRET not in open(rlog).read(), r.stdout + r.stderr)
+r = subprocess.run([BIN, "reveal", "bamboo"], text=True, capture_output=True,
+                   env=dict(env, KEYMULE_TEST_DIALOG="allow", KEYMULE_TEST_DIALOG_LOG=rlog))
+audit = open(os.path.join(home, "audit.log")).read() if os.path.exists(os.path.join(home, "audit.log")) else ""
+check("reveal shows the value in the dialog, never on stdout, and logs it",
+      r.returncode == 0 and SECRET in open(rlog).read() and SECRET not in r.stdout + r.stderr
+      and "\tREVEAL\t" in audit, r.stdout + r.stderr)
+
 # ---- keymule ui: local page, token-gated, no secrets --------------------------
 import re, time, urllib.request, urllib.error
 u = subprocess.Popen([BIN, "ui", "--no-open"], stdout=subprocess.PIPE, env=env, text=True)
@@ -463,6 +476,8 @@ code, body = ui_get("/api/state", {"X-Keymule-Token": tok})
 check("ui state lists credentials and holds no secret",
       code == 200 and '"bamboo"' in body and SECRET not in body, body[:300])
 code, body = ui_get("/api/rotate", {"X-Keymule-Token": tok}, b'{"name": "--help"}')
+check("ui won't pass a flag as a name to reveal",
+      '"bad name"' in ui_get("/api/reveal", {"X-Keymule-Token": tok}, b'{"name": "-x"}')[1])
 check("ui won't pass a flag as a name", '"bad name"' in body, body)
 u.terminate()
 
