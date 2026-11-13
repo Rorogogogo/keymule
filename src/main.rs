@@ -166,8 +166,17 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum HookKind {
-    /// Claude Code UserPromptSubmit: save pasted secrets and block the prompt.
+    /// Claude Code UserPromptSubmit: hold a prompt with a secret and ask.
     Prompt,
+    /// For the Claude Code mod: find secrets in the prompt on stdin (output
+    /// is masked).
+    Scan,
+    /// For the Claude Code mod: save the secrets in the prompt on stdin and
+    /// print it with each swapped for its keymule name.
+    Save {
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 fn home() -> Result<std::path::PathBuf> {
@@ -284,6 +293,30 @@ async fn run(cli: Cli) -> Result<()> {
             if let Some(out) = hook::run(&input, &mut store, store::vault().as_ref()) {
                 println!("{out}");
             }
+            Ok(())
+        }
+        Cmd::Hook {
+            kind: HookKind::Scan,
+        } => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            let store = Store::load()?;
+            println!(
+                "{}",
+                hook::scan_json(&input, &store, store::vault().as_ref())
+            );
+            Ok(())
+        }
+        Cmd::Hook {
+            kind: HookKind::Save { name },
+        } => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            let mut store = Store::load()?;
+            println!(
+                "{}",
+                hook::save_json(&input, name.as_deref(), &mut store, store::vault().as_ref())
+            );
             Ok(())
         }
     }
