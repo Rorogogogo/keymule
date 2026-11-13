@@ -330,7 +330,7 @@ function renderStats() {
   const failed = reqs.filter(a => !(a.status >= 200 && a.status < 300)).length
   const n = list.credentials.length + list.servers.length
   const stat = (k, v, cls) => h('div', { class: 'stat' }, h('span', { class: 'k' }, k), h('span', { class: `v ${cls || ''}` }, v))
-  return [stat('Secrets in keychain', n), stat('Requests today', reqs.length), stat('Failed today', failed, failed ? 'bad' : '')]
+  return [stat('Secrets stored', n), stat('Requests today', reqs.length), stat('Failed today', failed, failed ? 'bad' : '')]
 }
 
 function renderBanner() {

@@ -182,7 +182,7 @@ pub fn approve_url(name: &str, binding: &Binding, url: &str) -> Result<()> {
     Ok(())
 }
 
-fn item(name: &str) -> String {
+pub fn item(name: &str) -> String {
     format!("{ITEM_PREFIX}{name}")
 }
 

@@ -12,6 +12,7 @@ mod servers;
 mod store;
 mod tty;
 mod ui;
+mod vault;
 
 use std::io::Read;
 
@@ -96,6 +97,9 @@ enum Cmd {
     },
     /// Show the built-in service presets.
     Presets,
+    /// Move secrets an older keymule kept as separate keychain items into
+    /// keymule's encrypted vault (it also happens by itself as they're used).
+    Migrate,
     /// Find secrets that leaked to AI models or sit in plain text where agents can read them.
     Doctor {
         /// Also list unsure matches (secrets without a known format).
@@ -245,6 +249,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Reveal { name } => reveal(&name),
         Cmd::Test { name } => test(&name).await,
         Cmd::Rm { name, dialog } => rm(&name, dialog),
+        Cmd::Migrate => migrate(),
         Cmd::Presets => {
             for p in PRESETS {
                 println!("{:<8} {}  ({})", p.id, p.title, p.url_example);
@@ -688,6 +693,21 @@ fn rotate_server(name: &str, dialog: bool) -> Result<()> {
     binding.save(vault.as_ref(), name)?;
     println!(
         "Rotated {changed} secret(s) for \"{name}\". Restart your agent so the server picks them up."
+    );
+    Ok(())
+}
+
+fn migrate() -> Result<()> {
+    let store = Store::load()?;
+    let mut names: Vec<String> = store.creds.keys().cloned().collect();
+    names.extend(store.servers.keys().map(|n| servers::item(n)));
+    let dir = store::config_dir()?;
+    let v = vault::EncVault::open_default(dir.clone());
+    let moved = v.migrate(&names)?;
+    println!(
+        "Moved {moved} secret(s) into {}. {} secret(s) in all; only the vault's key stays in the keychain.",
+        dir.join("vault.enc").display(),
+        names.len()
     );
     Ok(())
 }
