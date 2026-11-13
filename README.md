@@ -30,7 +30,7 @@ Agent:  Build #482 failed in "Integration tests"…
 
 - 🙈 **The agent never sees the secret.** It refers to credentials by name; the secret is attached inside keymule and redacted from every response.
 - 🔒 **Locked to hosts.** A Bamboo token only goes to your Bamboo host. Requests elsewhere are refused, and redirects to other hosts are followed *without* the token. The allowed hosts are sealed in the keychain with the token, so editing keymule's files doesn't change them.
-- ✋ **Paste-to-save.** Paste a token into Claude Code by habit and a hook catches it *before* it is sent, saves it to the keychain and blocks the message.
+- ✋ **Paste-to-save.** Paste a token into Claude Code by habit and a hook catches it *before* it is sent and asks, right in the terminal: type `y` to save it (or `y <name>`) and your message goes on with the token swapped for its keymule name, or `n` to send it as it was.
 - 🧑‍💻 **A human approves the dangerous bits.** Pointing a credential at a new host or deleting it needs you at a real terminal, so a prompt-injected agent can't redirect your token.
 - 🚫 **No reveal command.** There is deliberately no `keymule get`; an agent with a shell could just run it.
 - 📒 **Audit log.** Every request is logged to `~/.config/keymule/audit.log` (without secrets).
@@ -118,7 +118,7 @@ The agent calls `add_mcp_secret(name="pg-dev", env="DATABASE_URI")`, you type th
 keymule's dialog, and the agent configures the server as
 `keymule exec pg-dev -- postgres-mcp --access-mode=restricted`. When it first starts, keymule shows
 you that command and asks whether it may have the secret. If you paste a database URL into chat
-by habit, the paste hook blocks it and saves it the same way (`keymule exec postgres --env
+by habit, the paste hook holds it back and, after you type `y`, saves it the same way (`keymule exec postgres --env
 DATABASE_URI -- …`). For a remote server the agent calls
 `add_mcp_secret(name="acme", header="x-api-key")` and sets it up as `keymule remote acme <url>`;
 you approve the URL once, the first time it connects.
@@ -204,6 +204,7 @@ agent running `security find-generic-password`) triggers a system prompt you hav
 
 ## ⚠️ Limits
 
+- A Claude Code hook can't edit a message, only stop it, so the paste hook holds the message in the keychain for up to 15 minutes until you answer `y` or `n`, and then hands it to the agent with your answer.
 - Paste detection is reliable for prefixed tokens (`ghp_`, `github_pat_`, `glpat-`, `sk-`, `AKIA`…) and database URLs with a password. Unprefixed tokens such as Bamboo's are caught when the message gives context ("my bamboo token is …"). Default passwords like `postgres:postgres@localhost` pass through.
 - HTTP APIs only. Database, SSH and cloud CLI credentials are on the roadmap.
 - The secure dialog is macOS-only for now; elsewhere use `keymule add` in a terminal.

@@ -1,96 +1,316 @@
-//! Claude Code `UserPromptSubmit` hook. It runs locally before the prompt
-//! is sent. When a secret is found, it is saved to the keychain and the
-//! prompt is blocked, so the secret never reaches the model.
+//! Claude Code `UserPromptSubmit` hook. It runs locally before a prompt is
+//! sent. A hook can't edit a prompt, only let it through or stop it, so when
+//! a prompt has a secret keymule holds it back (in the keychain, for a few
+//! minutes) and asks, right in the terminal, what to do. The next prompt is
+//! the answer: `y` saves the secret and sends the held-back message with the
+//! secret swapped for its keymule name, `y <name>` saves it under that name,
+//! and `n` sends the message as it was.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::detect;
 use crate::presets::{self, AuthKind};
-use crate::store::{Auth, Credential, Sealed, Store, Vault, host_of};
+use crate::store::{Auth, Credential, Sealed, Store, Vault, host_of, validate_name};
 
 /// Put this anywhere in a prompt to send it as-is.
 pub const IGNORE_MARKER: &str = "#keymule-ignore";
+
+/// Where the held-back prompt waits for the answer.
+const PENDING: &str = "pending:prompt";
+/// How long it waits.
+const PENDING_SECS: u64 = 15 * 60;
 
 #[derive(Deserialize)]
 struct HookInput {
     #[serde(default)]
     prompt: String,
+    #[serde(default)]
+    session_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Pending {
+    session: String,
+    at: u64,
+    prompt: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Reply {
+    Save(Option<String>),
+    Send,
+}
+
+/// What the hook does with a prompt.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Pass,
+    /// Stop the prompt and show the user this.
+    Block(String),
+    /// Let the prompt through with this context for the model, and show the
+    /// user the notice.
+    Context {
+        context: String,
+        notice: String,
+    },
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Returns the JSON to print on stdout, or None to let the prompt through.
 pub fn run(stdin: &str, store: &mut Store, vault: &dyn Vault) -> Option<String> {
     let input: HookInput = serde_json::from_str(stdin).ok()?;
-    let reason = check(&input.prompt, store, vault)?;
-    Some(serde_json::json!({ "decision": "block", "reason": reason }).to_string())
+    let out = match handle(&input.prompt, &input.session_id, store, vault, now()) {
+        Outcome::Pass => return None,
+        Outcome::Block(reason) => serde_json::json!({
+            "decision": "block",
+            "reason": reason,
+            // Claude Code would otherwise repeat the prompt, secret and all.
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "suppressOriginalPrompt": true,
+            },
+        }),
+        Outcome::Context { context, notice } => serde_json::json!({
+            "systemMessage": notice,
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": context,
+            },
+        }),
+    };
+    Some(out.to_string())
 }
 
-/// Returns the message shown to the user when the prompt must be blocked.
-pub fn check(prompt: &str, store: &mut Store, vault: &dyn Vault) -> Option<String> {
-    if prompt.contains(IGNORE_MARKER) {
+/// `y`, `y <name>`, `n` and their spelled-out forms.
+fn parse_reply(prompt: &str) -> Option<Reply> {
+    let mut words = prompt.split_whitespace();
+    let first = words.next()?.to_ascii_lowercase();
+    let name = words.next().map(str::to_string);
+    if words.next().is_some() {
         return None;
+    }
+    match first.as_str() {
+        "y" | "yes" | "save" => Some(Reply::Save(name)),
+        "n" | "no" | "send" if name.is_none() => Some(Reply::Send),
+        _ => None,
+    }
+}
+
+pub fn handle(
+    prompt: &str,
+    session: &str,
+    store: &mut Store,
+    vault: &dyn Vault,
+    at: u64,
+) -> Outcome {
+    if let Some(reply) = parse_reply(prompt)
+        && let Some(p) = take_pending(vault, session, at)
+    {
+        return answer(&p.prompt, reply, store, vault);
+    }
+    if prompt.contains(IGNORE_MARKER) {
+        return Outcome::Pass;
     }
     let found = detect::scan(prompt);
     if found.is_empty() {
-        return None;
+        return Outcome::Pass;
     }
-
-    let mut lines = vec![format!(
-        "keymule caught {} secret{} in your message and did NOT send it to the model.",
-        found.len(),
-        if found.len() == 1 { "" } else { "s" }
-    )];
-    let mut first_name = None;
-    for f in &found {
-        if f.service == Some(detect::DATABASE) {
-            match save_database(f, store, vault) {
-                Ok(name) => {
-                    lines.push(format!(
-                        "  ✓ saved as `{name}` ({}, for an MCP server)\n      \
-                         use it: ask your agent to set up the server with `keymule exec {name} --env <VAR> -- <server command>`;\n      \
-                         keymule asks you once to approve that command",
-                        f.label.as_deref().unwrap_or("database URL")
-                    ));
-                    first_name.get_or_insert(name);
-                }
-                Err(e) => lines.push(format!("  ✗ could not save it ({e:#})")),
-            }
-            continue;
-        }
-        match save(f, store, vault) {
-            Ok((name, todo)) => {
-                let title = presets::get_or_generic(&store.creds[&name].service).title;
-                lines.push(format!("  ✓ saved as `{name}` ({title}){todo}"));
-                first_name.get_or_insert(name);
-            }
-            Err(e) => lines.push(format!(
-                "  ✗ could not save it ({e:#}); run `keymule add` instead"
+    let held = serde_json::to_string(&Pending {
+        session: session.to_string(),
+        at,
+        prompt: prompt.to_string(),
+    })
+    .unwrap_or_default();
+    if let Err(e) = vault.set(PENDING, &held) {
+        // Can't hold it for an answer: keep the old behaviour and save now.
+        return match answer(prompt, Reply::Save(None), store, vault) {
+            Outcome::Context { notice, .. } => Outcome::Block(format!(
+                "keymule couldn't hold your message ({e:#}), so it saved the secret and stopped the message.\n{notice}\nSend your message again without the secret."
             )),
+            other => other,
+        };
+    }
+    Outcome::Block(question(&found, store, vault))
+}
+
+fn take_pending(vault: &dyn Vault, session: &str, at: u64) -> Option<Pending> {
+    let p: Pending = serde_json::from_str(&vault.get(PENDING).ok()?).ok()?;
+    let _ = vault.delete(PENDING);
+    (p.session == session && at.saturating_sub(p.at) <= PENDING_SECS).then_some(p)
+}
+
+fn describe(f: &detect::Found) -> String {
+    format!(
+        "{} ({})",
+        f.label.as_deref().unwrap_or("secret"),
+        crate::doctor::mask(&f.value)
+    )
+}
+
+fn question(found: &[detect::Found], store: &Store, vault: &dyn Vault) -> String {
+    let what = if found.len() == 1 {
+        format!("it has a {}", describe(&found[0]))
+    } else {
+        let list: Vec<String> = found.iter().map(describe).collect();
+        format!("it has {} secrets: {}", found.len(), list.join(", "))
+    };
+    let mut lines = vec![format!("keymule held back your message: {what}.")];
+    if found.len() == 1 {
+        let f = &found[0];
+        match known_as(f, store, vault) {
+            Some(n) => {
+                lines.push(format!("It's already in keymule as `{n}`."));
+                lines.push(format!(
+                    "  y           send your message with `{n}` in its place"
+                ));
+            }
+            None => {
+                let name = suggested_name(f, store);
+                lines.push(format!(
+                    "  y           save it as `{name}` and send your message without it"
+                ));
+                lines.push(format!(
+                    "  y <name>    save it under another name, e.g.  y {name}-work"
+                ));
+            }
+        }
+    } else {
+        lines.push("  y           save them and send your message without them".into());
+    }
+    lines.push("  n           send your message as it was".into());
+    lines.push(format!(
+        "(It waits {} minutes. Anything else you type is sent as usual.)",
+        PENDING_SECS / 60
+    ));
+    lines.join("\n")
+}
+
+/// Act on the answer to a held-back prompt.
+fn answer(prompt: &str, reply: Reply, store: &mut Store, vault: &dyn Vault) -> Outcome {
+    let typed = match reply {
+        Reply::Send => {
+            return Outcome::Context {
+                context: format!(
+                    "The user's previous message was held back by keymule because it contained a secret; \
+                     they chose to send it as it was. Treat it as their request:\n\n{prompt}"
+                ),
+                notice: "keymule sent your message as it was.".into(),
+            };
+        }
+        Reply::Save(t) => t,
+    };
+    let found = detect::scan(prompt);
+    let mut notes = Vec::new();
+    let mut message = prompt.to_string();
+    for f in &found {
+        let typed = if found.len() == 1 {
+            typed.as_deref()
+        } else {
+            None
+        };
+        let saved = match known_as(f, store, vault) {
+            Some(n) if typed.is_none_or(|t| t == n) => Ok((n, "already saved".to_string())),
+            _ => {
+                let name = pick_name(typed, suggested_name(f, store), store);
+                if f.service == Some(detect::DATABASE) {
+                    save_database(f, &name, store, vault)
+                        .map(|n| (n, "an MCP server secret".into()))
+                } else {
+                    save(f, &name, store, vault).map(|(n, todo)| {
+                        let title = presets::get_or_generic(&store.creds[&n].service).title;
+                        (n, format!("{title}{todo}"))
+                    })
+                }
+            }
+        };
+        match saved {
+            Ok((name, note)) => {
+                notes.push(format!("`{name}` ({note})"));
+                message = message.replace(&f.value, &format!("[saved in keymule as `{name}`]"));
+            }
+            Err(e) => {
+                notes.push(format!("one secret couldn't be saved ({e:#})"));
+                message = message.replace(&f.value, "[secret removed by keymule]");
+            }
         }
     }
-    if let Some(name) = first_name {
-        lines.push(format!(
-            "Re-send your message without the secret. The agent can use `{name}` by name."
-        ));
+    Outcome::Context {
+        context: format!(
+            "The user's previous message was held back by keymule because it contained a secret. \
+             keymule saved it ({}); use it through keymule by that name and never ask for the \
+             value. Treat this as the user's request:\n\n{message}",
+            notes.join(", ")
+        ),
+        notice: format!(
+            "keymule saved {} and sent your message without it.",
+            notes.join(", ")
+        ),
     }
-    lines.push(format!(
-        "(False alarm? Add {IGNORE_MARKER} to the message to send it unchanged.)"
-    ));
-    Some(lines.join("\n"))
+}
+
+/// The name a secret already has in keymule, if it's stored.
+fn known_as(found: &detect::Found, store: &Store, vault: &dyn Vault) -> Option<String> {
+    if found.service == Some(detect::DATABASE) {
+        return store
+            .servers
+            .keys()
+            .find(|n| {
+                crate::servers::Binding::load(vault, n)
+                    .is_ok_and(|b| b.env.values().any(|v| *v == found.value))
+            })
+            .cloned();
+    }
+    store
+        .creds
+        .keys()
+        .find(|n| Sealed::peek_secret(vault, n).as_deref() == Some(found.value.as_str()))
+        .cloned()
+}
+
+fn suggested_name(found: &detect::Found, store: &Store) -> String {
+    if found.service == Some(detect::DATABASE) {
+        store.free_name(db_base(&found.value))
+    } else {
+        store.free_name(presets::get_or_generic(found.service.unwrap_or("generic")).id)
+    }
+}
+
+/// The name to save under: the typed one if it's valid and free.
+fn pick_name(typed: Option<&str>, fallback: String, store: &Store) -> String {
+    match typed {
+        Some(n) if validate_name(n).is_ok() => store.free_name(n),
+        _ => fallback,
+    }
+}
+
+fn db_base(url: &str) -> &str {
+    match url.split("://").next().unwrap_or("db") {
+        "postgres" | "postgresql" => "postgres",
+        "mongodb+srv" => "mongodb",
+        "rediss" => "redis",
+        s => s,
+    }
 }
 
 /// A database URL becomes an MCP server secret (env `DATABASE_URL`, which
 /// `keymule exec --env` can rename). No command may use it until the user
 /// approves one.
-fn save_database(found: &detect::Found, store: &mut Store, vault: &dyn Vault) -> Result<String> {
-    let scheme = found.value.split("://").next().unwrap_or("db");
-    let base = match scheme {
-        "postgres" | "postgresql" => "postgres",
-        "mongodb+srv" => "mongodb",
-        "rediss" => "redis",
-        s => s,
-    };
-    let name = store.free_name(base);
+fn save_database(
+    found: &detect::Found,
+    name: &str,
+    store: &mut Store,
+    vault: &dyn Vault,
+) -> Result<String> {
+    let name = name.to_string();
     let mut binding = crate::servers::Binding::default();
     binding
         .env
@@ -111,9 +331,14 @@ fn save_database(found: &detect::Found, store: &mut Store, vault: &dyn Vault) ->
     Ok(name)
 }
 
-fn save(found: &detect::Found, store: &mut Store, vault: &dyn Vault) -> Result<(String, String)> {
+fn save(
+    found: &detect::Found,
+    name: &str,
+    store: &mut Store,
+    vault: &dyn Vault,
+) -> Result<(String, String)> {
     let preset = presets::get_or_generic(found.service.unwrap_or("generic"));
-    let name = store.free_name(preset.id);
+    let name = name.to_string();
     let url = preset.default_url.unwrap_or("").to_string();
     let hosts = if url.is_empty() {
         vec![]
@@ -166,7 +391,7 @@ fn save(found: &detect::Found, store: &mut Store, vault: &dyn Vault) -> Result<(
         String::new()
     } else {
         format!(
-            "\n      finish setup: ask your agent to finish setting up `{name}`, or run: keymule edit {name} {}",
+            "; finish setup: ask your agent, or run `keymule edit {name} {}`",
             todo.join(" ")
         )
     };
@@ -184,24 +409,78 @@ mod tests {
         (dir, s)
     }
 
+    const GH: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+
+    fn context(o: Outcome) -> (String, String) {
+        match o {
+            Outcome::Context { context, notice } => (context, notice),
+            other => panic!("expected context, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn blocks_and_saves_bamboo_token() {
+    fn holds_the_prompt_and_asks_in_the_terminal() {
         let (_d, mut s) = store();
         let v = MemVault::default();
-        let input = r#"{"prompt":"my bamboo token is NjQ3MjE4MzQ1Njc4OkxQmPq9Zr2Wd+Hs8 check the build","session_id":"x"}"#;
-        let out = run(input, &mut s, &v).expect("should block");
-        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(json["decision"], "block");
-        let reason = json["reason"].as_str().unwrap();
-        assert!(reason.contains("saved as `bamboo`"));
-        assert!(reason.contains("keymule edit bamboo --url"));
-        assert!(
-            !reason.contains("NjQ3MjE4"),
-            "the secret must not be echoed"
-        );
+        let Outcome::Block(q) = handle(&format!("use {GH} please"), "s1", &mut s, &v, 100) else {
+            panic!("should block")
+        };
+        assert!(q.contains("y <name>") && q.contains("`github`"), "{q}");
+        assert!(!q.contains(GH), "the question must not echo the secret");
+        assert!(s.creds.is_empty(), "nothing is saved before the answer");
+    }
+
+    #[test]
+    fn y_saves_and_sends_the_message_without_the_secret() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        handle(&format!("use {GH} for launchstory"), "s1", &mut s, &v, 100);
+        let (ctx, notice) = context(handle("y github-launchstory", "s1", &mut s, &v, 130));
+        assert_eq!(Sealed::peek_secret(&v, "github-launchstory").unwrap(), GH);
+        assert!(ctx.contains("use [saved in keymule as `github-launchstory`] for launchstory"));
+        assert!(!ctx.contains(GH) && !notice.contains(GH));
+        assert!(v.get(PENDING).is_err(), "the held prompt is gone");
+    }
+
+    #[test]
+    fn n_sends_it_as_it_was() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        handle(GH, "s1", &mut s, &v, 100);
+        let (ctx, _) = context(handle("n", "s1", &mut s, &v, 110));
+        assert!(ctx.contains(GH));
+        assert!(s.creds.is_empty());
+    }
+
+    #[test]
+    fn an_answer_from_another_session_or_too_late_is_a_normal_prompt() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        handle(GH, "s1", &mut s, &v, 100);
+        assert_eq!(handle("y", "s2", &mut s, &v, 110), Outcome::Pass);
+        handle(GH, "s1", &mut s, &v, 100);
         assert_eq!(
-            Sealed::peek_secret(&v, "bamboo").unwrap(),
-            "NjQ3MjE4MzQ1Njc4OkxQmPq9Zr2Wd+Hs8"
+            handle("y", "s1", &mut s, &v, 100 + PENDING_SECS + 1),
+            Outcome::Pass
+        );
+        assert!(s.creds.is_empty());
+    }
+
+    #[test]
+    fn bamboo_token_needs_its_url_later() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        handle(
+            "my bamboo token is NjQ3MjE4MzQ1Njc4OkxQmPq9Zr2Wd+Hs8 check the build",
+            "s",
+            &mut s,
+            &v,
+            1,
+        );
+        let (_, notice) = context(handle("y", "s", &mut s, &v, 2));
+        assert!(
+            notice.contains("`bamboo`") && notice.contains("keymule edit bamboo --url"),
+            "{notice}"
         );
         assert_eq!(s.creds["bamboo"].added_by, "paste-hook");
     }
@@ -210,8 +489,9 @@ mod tests {
     fn github_token_is_ready_to_use() {
         let (_d, mut s) = store();
         let v = MemVault::default();
-        let reason = check("ghp_abcdefghijklmnopqrstuvwxyz0123456789", &mut s, &v).unwrap();
-        assert!(!reason.contains("finish setup"));
+        handle(GH, "s", &mut s, &v, 1);
+        let (_, notice) = context(handle("yes", "s", &mut s, &v, 2));
+        assert!(!notice.contains("finish setup"));
         assert_eq!(s.creds["github"].hosts, vec!["api.github.com"]);
     }
 
@@ -220,22 +500,30 @@ mod tests {
         let (_d, mut s) = store();
         let v = MemVault::default();
         let url = "postgres://app:Vq7Lp2Xk9Rt4@db.internal:5432/app";
-        let reason = check(&format!("add a pg mcp for {url}"), &mut s, &v).unwrap();
-        assert!(reason.contains("saved as `postgres`"), "{reason}");
-        assert!(!reason.contains("Vq7Lp2Xk9Rt4"));
+        handle(&format!("add a pg mcp for {url}"), "s", &mut s, &v, 1);
+        let (ctx, _) = context(handle("y", "s", &mut s, &v, 2));
+        assert!(
+            ctx.contains("`postgres`") && !ctx.contains("Vq7Lp2Xk9Rt4"),
+            "{ctx}"
+        );
         let b = crate::servers::Binding::load(&v, "postgres").unwrap();
         assert_eq!(b.env["DATABASE_URL"], url);
         assert!(b.commands.is_empty(), "no command is approved yet");
-        assert!(s.servers.contains_key("postgres") && s.creds.is_empty());
     }
 
     #[test]
-    fn second_token_gets_new_name() {
+    fn a_secret_already_saved_is_not_saved_twice() {
         let (_d, mut s) = store();
         let v = MemVault::default();
-        check("ghp_abcdefghijklmnopqrstuvwxyz0123456789", &mut s, &v);
-        check("ghp_zyxwvutsrqponmlkjihgfedcba9876543210", &mut s, &v);
-        assert!(s.creds.contains_key("github-2"));
+        handle(GH, "s", &mut s, &v, 1);
+        handle("y", "s", &mut s, &v, 2);
+        let Outcome::Block(q) = handle(GH, "s", &mut s, &v, 3) else {
+            panic!()
+        };
+        assert!(q.contains("already in keymule as `github`"), "{q}");
+        let (_, notice) = context(handle("y", "s", &mut s, &v, 4));
+        assert!(notice.contains("already saved"));
+        assert_eq!(s.creds.len(), 1);
     }
 
     #[test]
@@ -243,8 +531,39 @@ mod tests {
         let (_d, mut s) = store();
         let v = MemVault::default();
         assert!(run(r#"{"prompt":"check my bamboo pipeline"}"#, &mut s, &v).is_none());
-        let p = format!("ghp_abcdefghijklmnopqrstuvwxyz0123456789 {IGNORE_MARKER}");
-        assert!(check(&p, &mut s, &v).is_none());
+        assert_eq!(
+            handle("y", "s", &mut s, &v, 1),
+            Outcome::Pass,
+            "a lone y with nothing held"
+        );
+        assert_eq!(
+            handle(&format!("{GH} {IGNORE_MARKER}"), "s", &mut s, &v, 1),
+            Outcome::Pass
+        );
         assert!(s.creds.is_empty());
+    }
+
+    #[test]
+    fn hook_json_hides_the_prompt_and_carries_the_context() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        let block = run(
+            &format!(r#"{{"prompt":"{GH}","session_id":"s"}}"#),
+            &mut s,
+            &v,
+        )
+        .unwrap();
+        let j: serde_json::Value = serde_json::from_str(&block).unwrap();
+        assert_eq!(j["decision"], "block");
+        assert_eq!(j["hookSpecificOutput"]["suppressOriginalPrompt"], true);
+        let ok = run(r#"{"prompt":"y","session_id":"s"}"#, &mut s, &v).unwrap();
+        let j: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        assert!(j.get("decision").is_none());
+        assert!(
+            j["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("`github`")
+        );
     }
 }
