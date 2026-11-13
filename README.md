@@ -30,7 +30,7 @@ Agent:  Build #482 failed in "Integration tests"…
 
 - 🙈 **The agent never sees the secret.** It refers to credentials by name; the secret is attached inside keymule and redacted from every response.
 - 🔒 **Locked to hosts.** A Bamboo token only goes to your Bamboo host. Requests elsewhere are refused, and redirects to other hosts are followed *without* the token. The allowed hosts are sealed in the keychain with the token, so editing keymule's files doesn't change them.
-- ✋ **Paste-to-save.** Paste a token into Claude Code by habit and a hook catches it *before* it is sent and asks, right in the terminal: type `y` to save it (or `y <name>`) and your message goes on with the token swapped for its keymule name, or `n` to send it as it was.
+- ✋ **Paste-to-save.** Paste a token into Claude Code by habit and a hook catches it *before* it is sent and asks, right in the terminal: type `y` to save it under a name taken from your message (`github-launchstory` for "the PAT for our launchstory account"), with your words as its description so the agent picks the right one later, or `y <name>` and your message goes on with the token swapped for its keymule name, or `n` to send it as it was.
 - 🧑‍💻 **A human approves the dangerous bits.** Pointing a credential at a new host or deleting it needs you at a real terminal, so a prompt-injected agent can't redirect your token.
 - 🚫 **No reveal command.** There is deliberately no `keymule get`; an agent with a shell could just run it.
 - 📒 **Audit log.** Every request is logged to `~/.config/keymule/audit.log` (without secrets).
@@ -157,7 +157,7 @@ up to `settings.json.keymule-bak`.
 | `keymule rotate <name> [--dialog]` | Replace the secret after rotating it |
 | `keymule reveal <name>` | Show a secret in a macOS window after you agree (never printed, so agents running it can't read it); Copy clears the clipboard after 30 s |
 | `keymule test <name>` | Check the credential still works |
-| `keymule rm <name>` | Delete it (needs terminal confirmation) |
+| `keymule rm <name> [--dialog]` | Delete it (asks you first, on the terminal or in a dialog; the web page's Delete uses the dialog) |
 | `keymule presets` | List service presets |
 | `keymule doctor [--all] [--json] [--dir D]` | Find leaked and plain-text secrets |
 | `keymule adopt [--dry-run] [--yes] [--server NAME]` | Move plain-text MCP server secrets into the keychain |
