@@ -81,6 +81,35 @@ pub fn secret(message: &str) -> Result<Answer> {
     platform_secret(message)
 }
 
+/// Ask before deleting something. Defaults to "Cancel".
+pub fn confirm_delete(message: &str) -> Result<bool> {
+    if let Some(a) = test_answer(message) {
+        return Ok(a == "allow");
+    }
+    platform_confirm_delete(message)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_confirm_delete(message: &str) -> Result<bool> {
+    let script = [
+        "on run argv".to_string(),
+        format!(
+            "set r to display dialog (item 1 of argv) with title \"keymule\" \
+             buttons {{\"Cancel\", \"Delete\"}} default button \"Cancel\" \
+             cancel button \"Cancel\" with icon caution giving up after {TIMEOUT_SECS}"
+        ),
+        "if gave up of r then error \"keymule-timeout\" number 2".to_string(),
+        "return button returned of r".to_string(),
+        "end run".to_string(),
+    ];
+    Ok(osascript(&script, message)? == Answer::Text("Delete".into()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_confirm_delete(_message: &str) -> Result<bool> {
+    anyhow::bail!("the confirmation dialog is macOS-only for now; run `keymule rm` in a terminal")
+}
+
 /// Ask the user to allow something. Defaults to "Don't Allow".
 pub fn confirm(message: &str) -> Result<bool> {
     if let Some(a) = test_answer(message) {

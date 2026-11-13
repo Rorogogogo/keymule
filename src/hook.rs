@@ -6,9 +6,11 @@
 //! secret swapped for its keymule name, `y <name>` saves it under that name,
 //! and `n` sends the message as it was.
 
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::detect;
@@ -139,7 +141,7 @@ pub fn handle(
             other => other,
         };
     }
-    Outcome::Block(question(&found, store, vault))
+    Outcome::Block(question(prompt, &found, store, vault))
 }
 
 fn take_pending(vault: &dyn Vault, session: &str, at: u64) -> Option<Pending> {
@@ -156,7 +158,8 @@ fn describe(f: &detect::Found) -> String {
     )
 }
 
-fn question(found: &[detect::Found], store: &Store, vault: &dyn Vault) -> String {
+fn question(prompt: &str, found: &[detect::Found], store: &Store, vault: &dyn Vault) -> String {
+    let hint = context_hint(prompt, found);
     let what = if found.len() == 1 {
         format!("it has a {}", describe(&found[0]))
     } else {
@@ -174,13 +177,11 @@ fn question(found: &[detect::Found], store: &Store, vault: &dyn Vault) -> String
                 ));
             }
             None => {
-                let name = suggested_name(f, store);
+                let name = suggested_name(f, store, hint.as_deref());
                 lines.push(format!(
                     "  y           save it as `{name}` and send your message without it"
                 ));
-                lines.push(format!(
-                    "  y <name>    save it under another name, e.g.  y {name}-work"
-                ));
+                lines.push("  y <name>    save it under another name".to_string());
             }
         }
     } else {
@@ -209,6 +210,7 @@ fn answer(prompt: &str, reply: Reply, store: &mut Store, vault: &dyn Vault) -> O
         Reply::Save(t) => t,
     };
     let found = detect::scan(prompt);
+    let hint = context_hint(prompt, &found);
     let mut notes = Vec::new();
     let mut message = prompt.to_string();
     for f in &found {
@@ -220,12 +222,13 @@ fn answer(prompt: &str, reply: Reply, store: &mut Store, vault: &dyn Vault) -> O
         let saved = match known_as(f, store, vault) {
             Some(n) if typed.is_none_or(|t| t == n) => Ok((n, "already saved".to_string())),
             _ => {
-                let name = pick_name(typed, suggested_name(f, store), store);
+                let name = pick_name(typed, suggested_name(f, store, hint.as_deref()), store);
                 if f.service == Some(detect::DATABASE) {
                     save_database(f, &name, store, vault)
                         .map(|n| (n, "an MCP server secret".into()))
                 } else {
-                    save(f, &name, store, vault).map(|(n, todo)| {
+                    let desc = description(f, prompt, &found, hint.as_deref());
+                    save(f, &name, &desc, store, vault).map(|(n, todo)| {
                         let title = presets::get_or_generic(&store.creds[&n].service).title;
                         (n, format!("{title}{todo}"))
                     })
@@ -276,11 +279,163 @@ fn known_as(found: &detect::Found, store: &Store, vault: &dyn Vault) -> Option<S
         .cloned()
 }
 
-fn suggested_name(found: &detect::Found, store: &Store) -> String {
-    if found.service == Some(detect::DATABASE) {
-        store.free_name(db_base(&found.value))
+/// Words that never name an account or project.
+const NOT_A_NAME: &[&str] = &[
+    "the",
+    "my",
+    "our",
+    "your",
+    "this",
+    "that",
+    "these",
+    "it",
+    "me",
+    "us",
+    "you",
+    "a",
+    "an",
+    "prod",
+    "production",
+    "dev",
+    "staging",
+    "local",
+    "now",
+    "here",
+    "there",
+    "use",
+    "using",
+    "token",
+    "tokens",
+    "pat",
+    "key",
+    "keys",
+    "api",
+    "access",
+    "personal",
+    "secret",
+    "password",
+    "account",
+    "new",
+    "old",
+    "main",
+    "test",
+    "later",
+    "help",
+    "setup",
+    "set",
+    "check",
+    "real",
+    "github",
+    "gitlab",
+    "bamboo",
+    "jenkins",
+    "aws",
+    "npm",
+    "openai",
+    "stripe",
+    "slack",
+    "postgres",
+    "own",
+    "everything",
+    "something",
+    "all",
+    "both",
+    "each",
+    "free",
+    "paid",
+    "same",
+    "other",
+    "another",
+];
+
+/// "<name> github account", "<name> org", "<name> project"...
+static ACCOUNT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b([a-z0-9][a-z0-9_.-]{1,38})\s+(?:(?:github|gitlab|bamboo|jenkins|aws|npm|openai|stripe|slack)\s+)?(?:account|org|organisation|organization|team|workspace|project|repo|company|client)\b",
+    )
+    .unwrap()
+});
+/// "for <name>", "of <name>", "from <name>".
+static FOR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:for|of|from|at)\s+(?:the\s+|my\s+|our\s+)?([a-z0-9][a-z0-9_.-]{1,38})\b")
+        .unwrap()
+});
+
+/// What the message says the secret is for, e.g. "launchstory" in "this is
+/// the PAT for the launchstory GitHub account".
+fn context_hint(prompt: &str, found: &[detect::Found]) -> Option<String> {
+    let mut text = prompt.to_string();
+    for f in found {
+        text = text.replace(&f.value, " ");
+    }
+    let ok = |w: &str| {
+        let w = w.to_ascii_lowercase();
+        !NOT_A_NAME.contains(&w.as_str()) && !w.chars().all(|c| c.is_ascii_digit())
+    };
+    let hit = ACCOUNT_RE
+        .captures_iter(&text)
+        .chain(FOR_RE.captures_iter(&text))
+        .map(|c| c[1].trim_matches(['.', '-', '_']).to_string())
+        .find(|w| w.len() >= 2 && ok(w))?;
+    let slug: String = hit
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-').to_string();
+    (!slug.is_empty()).then_some(slug)
+}
+
+/// A short description from the message itself, secrets taken out, so the
+/// agent can later tell "github-launchstory" from "github-work".
+fn description(
+    f: &detect::Found,
+    prompt: &str,
+    found: &[detect::Found],
+    hint: Option<&str>,
+) -> String {
+    let label = f.label.as_deref().unwrap_or("Secret");
+    let mut d = match hint {
+        Some(h) => format!("{label} for {h}"),
+        None => label.to_string(),
+    };
+    let mut text = prompt.to_string();
+    for other in found {
+        text = text.replace(&other.value, "\u{1}");
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if let Some(at) = words.iter().position(|w| w.contains('\u{1}')) {
+        let from = at.saturating_sub(14);
+        let to = (at + 8).min(words.len());
+        let quote = words[from..to]
+            .iter()
+            .filter(|w| !w.contains('\u{1}'))
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !quote.is_empty() {
+            let quote: String = quote.chars().take(160).collect();
+            let more = if from > 0 { "…" } else { "" };
+            let tail = if to < words.len() { "…" } else { "" };
+            d.push_str(&format!(
+                ". From the message it was pasted in: \"{more}{quote}{tail}\""
+            ));
+        }
+    }
+    d
+}
+
+fn suggested_name(found: &detect::Found, store: &Store, hint: Option<&str>) -> String {
+    let base = if found.service == Some(detect::DATABASE) {
+        db_base(&found.value).to_string()
     } else {
-        store.free_name(presets::get_or_generic(found.service.unwrap_or("generic")).id)
+        presets::get_or_generic(found.service.unwrap_or("generic"))
+            .id
+            .to_string()
+    };
+    match hint {
+        Some(h) if h != base => store.free_name(&format!("{base}-{h}")),
+        _ => store.free_name(&base),
     }
 }
 
@@ -334,6 +489,7 @@ fn save_database(
 fn save(
     found: &detect::Found,
     name: &str,
+    description: &str,
     store: &mut Store,
     vault: &dyn Vault,
 ) -> Result<(String, String)> {
@@ -374,7 +530,7 @@ fn save(
     let cred = Credential {
         service: preset.id.into(),
         url,
-        description: String::new(),
+        description: description.to_string(),
         auth,
         hosts,
         added_by: "paste-hook".into(),
@@ -440,6 +596,32 @@ mod tests {
         assert!(ctx.contains("use [saved in keymule as `github-launchstory`] for launchstory"));
         assert!(!ctx.contains(GH) && !notice.contains(GH));
         assert!(v.get(PENDING).is_err(), "the held prompt is gone");
+    }
+
+    #[test]
+    fn names_and_describes_it_from_the_message() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        let msg =
+            format!("this is the pat for launchstory github account {GH}, keep my own one too");
+        let Outcome::Block(q) = handle(&msg, "s", &mut s, &v, 1) else {
+            panic!()
+        };
+        assert!(q.contains("`github-launchstory`"), "{q}");
+        handle("y", "s", &mut s, &v, 2);
+        let c = &s.creds["github-launchstory"];
+        assert!(
+            c.description.starts_with("GitHub token for launchstory"),
+            "{}",
+            c.description
+        );
+        assert!(c.description.contains("pat for launchstory github account"));
+        assert!(!c.description.contains(GH));
+        assert_eq!(
+            context_hint("use it for the acme org", &[]).as_deref(),
+            Some("acme")
+        );
+        assert_eq!(context_hint("check my actions runs", &[]), None);
     }
 
     #[test]

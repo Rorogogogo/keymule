@@ -88,7 +88,12 @@ enum Cmd {
     /// Check that a stored credential still works.
     Test { name: String },
     /// Delete a credential and its secret.
-    Rm { name: String },
+    Rm {
+        name: String,
+        /// Confirm in a macOS dialog instead of the terminal.
+        #[arg(long)]
+        dialog: bool,
+    },
     /// Show the built-in service presets.
     Presets,
     /// Find secrets that leaked to AI models or sit in plain text where agents can read them.
@@ -230,7 +235,7 @@ async fn run(cli: Cli) -> Result<()> {
         } => rotate(&name, no_verify, dialog).await,
         Cmd::Reveal { name } => reveal(&name),
         Cmd::Test { name } => test(&name).await,
-        Cmd::Rm { name } => rm(&name),
+        Cmd::Rm { name, dialog } => rm(&name, dialog),
         Cmd::Presets => {
             for p in PRESETS {
                 println!("{:<8} {}  ({})", p.id, p.title, p.url_example);
@@ -702,12 +707,27 @@ fn adopt(dry_run: bool, yes: bool, force: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn rm(name: &str) -> Result<()> {
+/// A human has to say yes: on the terminal, or in keymule's own dialog.
+fn confirm_rm(question: &str, dialog: bool) -> Result<()> {
+    if !dialog {
+        return tty::confirm(question);
+    }
+    if dialog::confirm_delete(question)? {
+        Ok(())
+    } else {
+        bail!("cancelled; nothing was deleted")
+    }
+}
+
+fn rm(name: &str, dialog: bool) -> Result<()> {
     let mut store = Store::load()?;
     if store.servers.contains_key(name) && !store.creds.contains_key(name) {
-        tty::confirm(&format!(
-            "Delete MCP server \"{name}\" and its secrets? Configs that run `keymule exec {name}` will stop working."
-        ))?;
+        confirm_rm(
+            &format!(
+                "Delete MCP server \"{name}\" and its secrets? Configs that run `keymule exec {name}` will stop working."
+            ),
+            dialog,
+        )?;
         servers::Binding::delete(store::vault().as_ref(), name)?;
         store.servers.remove(name);
         store.save()?;
@@ -715,7 +735,10 @@ fn rm(name: &str) -> Result<()> {
         return Ok(());
     }
     store.get(name)?;
-    tty::confirm(&format!("Delete \"{name}\" and its secret?"))?;
+    confirm_rm(
+        &format!("Delete \"{name}\" and its secret? Agents using it will stop working."),
+        dialog,
+    )?;
     store::vault().delete(name)?;
     store.creds.remove(name);
     store.save()?;

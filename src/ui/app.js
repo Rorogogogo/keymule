@@ -270,6 +270,18 @@ function revealButton(name) {
   }, busy ? 'Showing…' : 'Reveal')
 }
 
+function deleteButton(name) {
+  const busy = state.busy.has(`delete:${name}`)
+  return h('button', {
+    class: 'btn ghost danger', type: 'button', disabled: busy, title: 'Delete it from keymule (asks in a keymule window first)',
+    onclick: e => {
+      e.stopPropagation()
+      run(`delete:${name}`, `A keymule window asks before deleting "${name}".`,
+        () => api('/api/delete', { name }), loadPlan)
+    },
+  }, busy ? 'Waiting…' : 'Delete')
+}
+
 function rowAttrs(name) {
   return {
     class: `row click${state.filter === name ? ' sel' : ''}`,
@@ -289,8 +301,8 @@ function renderCreds(creds) {
       ico('key'),
       h('span', { class: 'body' },
         h('span', { class: 'title' }, c.name),
-        h('span', { class: 'sub' }, join([c.service, (c.hosts || []).join(', '), c.auth]))),
-      h('span', { class: 'acc' }, status, revealButton(c.name), rotateButton(c.name)))
+        h('span', { class: 'sub', title: c.description || null }, join([c.description || c.service, (c.hosts || []).join(', '), c.auth]))),
+      h('span', { class: 'acc' }, status, revealButton(c.name), rotateButton(c.name), deleteButton(c.name)))
   })
 }
 
@@ -306,7 +318,7 @@ function renderServers(servers) {
       h('span', { class: 'body' },
         h('span', { class: 'title' }, s.name),
         h('span', { class: 'sub' }, join([mono(what.join(', ')), used ? `used by ${used} config entr${used === 1 ? 'y' : 'ies'}` : null]))),
-      h('span', { class: 'acc' }, used ? badge('Active', 'ok') : badge('Unused'), revealButton(s.name), rotateButton(s.name)))
+      h('span', { class: 'acc' }, used ? badge('Active', 'ok') : badge('Unused'), revealButton(s.name), rotateButton(s.name), deleteButton(s.name)))
   })
 }
 

@@ -237,6 +237,13 @@ fn api(ctx: &Ctx, method: &str, path: &str, body: &[u8]) -> Value {
             }
             keymule(ctx, &["rotate", name, "--dialog"])
         }
+        ("POST", "/api/delete") => {
+            let name = field("name");
+            if !simple_name(name) {
+                return json!({"ok": false, "stderr": "bad name"});
+            }
+            keymule(ctx, &["rm", name, "--dialog"])
+        }
         ("POST", "/api/reveal") => {
             let name = field("name");
             if !simple_name(name) {

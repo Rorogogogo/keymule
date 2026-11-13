@@ -259,6 +259,23 @@ out = hook("y")
 check("hook saves a database URL as an MCP secret after y",
       "`postgres`" in out["systemMessage"] and "Zt5Wq8Rm2Nx6" not in json.dumps(out)
       and "Zt5Wq8Rm2Nx6" in vault_now().get("mcp:postgres", ""), json.dumps(out))
+other = "ghp_zyxwvutsrqponmlkjihgfedcba9876543210"
+out = hook(f"can you check the acme app and think if we can prod, and this is the pat for launchstory github account, "
+           f"can you help me set it up, but still keep our own github account {other}")
+print("\n--- what the user sees ---\n" + out["reason"] + "\n---")
+check("the paste hook names the key from the message", "`github-launchstory`" in out["reason"], out["reason"])
+hook("y")
+lst = json.loads(subprocess.run([BIN, "list", "--json"], env=env, text=True, capture_output=True).stdout)
+gl = [c for c in lst["credentials"] if c["name"] == "github-launchstory"]
+check("and describes it in the message's words, without the token",
+      gl and gl[0]["description"].startswith("GitHub token for launchstory") and other not in gl[0]["description"],
+      json.dumps(gl))
+r = subprocess.run([BIN, "rm", "github-launchstory", "--dialog"], text=True, capture_output=True,
+                   env=dict(env, KEYMULE_TEST_DIALOG="deny"))
+check("rm --dialog keeps it when the dialog says no", r.returncode != 0 and "github-launchstory" in vault_now(), r.stderr)
+r = subprocess.run([BIN, "rm", "github-launchstory", "--dialog"], text=True, capture_output=True,
+                   env=dict(env, KEYMULE_TEST_DIALOG="allow"))
+check("rm --dialog deletes it after the dialog says yes", r.returncode == 0 and "github-launchstory" not in vault_now(), r.stderr)
 hook(f"again {pasted}")
 out = hook("n")
 check("`n` sends the held message as it was",
