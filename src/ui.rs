@@ -2,7 +2,7 @@
 //! --json`, the audit log, `keymule doctor --json` and `keymule adopt
 //! --dry-run` show, and its buttons run keymule commands that open keymule's
 //! own dialogs. No secret ever passes through the page: there is no endpoint
-//! that takes or returns one.
+//! that takes or returns one (Reveal shows the value in a keymule window).
 //!
 //! The server listens on 127.0.0.1 only. Every API call needs a token that
 //! is only in the URL keymule opens (in the fragment, so it's never sent in a
@@ -236,6 +236,13 @@ fn api(ctx: &Ctx, method: &str, path: &str, body: &[u8]) -> Value {
                 return json!({"ok": false, "stderr": "bad name"});
             }
             keymule(ctx, &["rotate", name, "--dialog"])
+        }
+        ("POST", "/api/reveal") => {
+            let name = field("name");
+            if !simple_name(name) {
+                return json!({"ok": false, "stderr": "bad name"});
+            }
+            keymule(ctx, &["reveal", name])
         }
         ("POST", "/api/add") => {
             let service = field("service");

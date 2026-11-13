@@ -229,25 +229,40 @@ p.wait(timeout=5)
 audit = open(os.path.join(home, "audit.log")).read()
 check("audit log records requests, no secret", "bamboo\tGET" in audit and SECRET not in audit, audit)
 
-# ---- paste hook -----------------------------------------------------------
+# ---- paste hook: hold, ask in the terminal, answer with the next prompt -------
 pasted = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
-h = subprocess.run([BIN, "hook", "prompt"], env=env, text=True, capture_output=True,
-                   input=json.dumps({"prompt": f"use {pasted} to check my actions runs",
-                                     "session_id": "s", "hook_event_name": "UserPromptSubmit"}))
-out = json.loads(h.stdout)
-check("hook blocks prompt containing a token", out["decision"] == "block", h.stdout)
+
+
+def hook(prompt, session="s"):
+    h = subprocess.run([BIN, "hook", "prompt"], env=env, text=True, capture_output=True,
+                       input=json.dumps({"prompt": prompt, "session_id": session,
+                                         "hook_event_name": "UserPromptSubmit"}))
+    return json.loads(h.stdout) if h.stdout.strip() else None
+
+
+out = hook(f"use {pasted} to check my actions runs")
+check("hook holds back a prompt with a token and asks in the terminal",
+      out["decision"] == "block" and "y <name>" in out["reason"] and "github" not in vault_now(), json.dumps(out))
 check("hook message does not echo the token", pasted not in out["reason"], out["reason"])
-check("hook saved it to the vault", vault_now().get("github") == pasted)
+check("hook hides the original prompt from the block message",
+      out["hookSpecificOutput"]["suppressOriginalPrompt"] is True, json.dumps(out))
 print("\n--- what the user sees ---\n" + out["reason"] + "\n---")
-h = subprocess.run([BIN, "hook", "prompt"], env=env, text=True, capture_output=True,
-                   input=json.dumps({"prompt": "check my bamboo pipeline"}))
-check("clean prompt passes through", h.returncode == 0 and h.stdout == "", h.stdout)
-h = subprocess.run([BIN, "hook", "prompt"], env=env, text=True, capture_output=True,
-                   input=json.dumps({"prompt": "add a pg mcp for postgres://app:Zt5Wq8Rm2Nx6@db.corp:5432/app"}))
-out = json.loads(h.stdout)
-check("hook blocks a database URL and saves it as an MCP secret",
-      out["decision"] == "block" and "saved as `postgres`" in out["reason"] and "Zt5Wq8Rm2Nx6" not in out["reason"]
-      and "Zt5Wq8Rm2Nx6" in vault_now().get("mcp:postgres", ""), h.stdout)
+out = hook("y gh-work")
+ctx = out["hookSpecificOutput"]["additionalContext"]
+check("`y <name>` saves it under that name and sends the message without it",
+      vault_now().get("gh-work") == pasted and "use [saved in keymule as `gh-work`] to check my actions runs" in ctx
+      and pasted not in ctx and "decision" not in out, json.dumps(out))
+check("clean prompt passes through", hook("check my bamboo pipeline") is None)
+check("a lone y with nothing held is a normal prompt", hook("y") is None)
+out = hook("add a pg mcp for postgres://app:Zt5Wq8Rm2Nx6@db.corp:5432/app")
+out = hook("y")
+check("hook saves a database URL as an MCP secret after y",
+      "`postgres`" in out["systemMessage"] and "Zt5Wq8Rm2Nx6" not in json.dumps(out)
+      and "Zt5Wq8Rm2Nx6" in vault_now().get("mcp:postgres", ""), json.dumps(out))
+hook(f"again {pasted}")
+out = hook("n")
+check("`n` sends the held message as it was",
+      pasted in out["hookSpecificOutput"]["additionalContext"], json.dumps(out))
 
 # ---- CLI used by the Claude Code panel ---------------------------------------
 l = subprocess.run([BIN, "list", "--json"], env=env, text=True, capture_output=True)
@@ -436,6 +451,19 @@ got, err, code = bridge([BIN, "remote", "remote-new", murl], [INIT], {"KEYMULE_T
 check("after approving the URL once, the new remote server connects",
       got.get(1, {}).get("result", {}).get("serverInfo", {}).get("name") == "fake-remote", json.dumps(got) + err)
 
+# ---- keymule reveal: shown in a dialog, never printed -------------------------
+rlog = os.path.join(home, "reveal.log")
+r = subprocess.run([BIN, "reveal", "bamboo"], text=True, capture_output=True,
+                   env=dict(env, KEYMULE_TEST_DIALOG="deny", KEYMULE_TEST_DIALOG_LOG=rlog))
+check("reveal asks first and shows nothing when refused",
+      r.returncode == 0 and "Not shown" in r.stdout and SECRET not in open(rlog).read(), r.stdout + r.stderr)
+r = subprocess.run([BIN, "reveal", "bamboo"], text=True, capture_output=True,
+                   env=dict(env, KEYMULE_TEST_DIALOG="allow", KEYMULE_TEST_DIALOG_LOG=rlog))
+audit = open(os.path.join(home, "audit.log")).read() if os.path.exists(os.path.join(home, "audit.log")) else ""
+check("reveal shows the value in the dialog, never on stdout, and logs it",
+      r.returncode == 0 and SECRET in open(rlog).read() and SECRET not in r.stdout + r.stderr
+      and "\tREVEAL\t" in audit, r.stdout + r.stderr)
+
 # ---- keymule ui: local page, token-gated, no secrets --------------------------
 import re, time, urllib.request, urllib.error
 u = subprocess.Popen([BIN, "ui", "--no-open"], stdout=subprocess.PIPE, env=env, text=True)
@@ -463,6 +491,8 @@ code, body = ui_get("/api/state", {"X-Keymule-Token": tok})
 check("ui state lists credentials and holds no secret",
       code == 200 and '"bamboo"' in body and SECRET not in body, body[:300])
 code, body = ui_get("/api/rotate", {"X-Keymule-Token": tok}, b'{"name": "--help"}')
+check("ui won't pass a flag as a name to reveal",
+      '"bad name"' in ui_get("/api/reveal", {"X-Keymule-Token": tok}, b'{"name": "-x"}')[1])
 check("ui won't pass a flag as a name", '"bad name"' in body, body)
 u.terminate()
 

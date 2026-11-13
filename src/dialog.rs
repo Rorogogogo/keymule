@@ -89,6 +89,128 @@ pub fn confirm(message: &str) -> Result<bool> {
     platform_confirm(message)
 }
 
+/// Show stored values on screen, after the user agrees to it. Returns false
+/// if they didn't. `copy` is the value the Copy button puts on the clipboard
+/// (cleared again after 30 seconds); without it there is no Copy button.
+pub fn reveal(name: &str, items: &[(String, String)], copy: Option<&str>) -> Result<bool> {
+    let shown = items
+        .iter()
+        .map(|(k, v)| format!("{k}\n{v}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let ask = format!(
+        "Show the secret for \"{name}\" on screen?\n\nAnyone who can see your screen, or a \
+         screen recording, will see it. The window closes after 30 seconds."
+    );
+    if let Some(a) = test_answer(&ask) {
+        if a != "allow" {
+            return Ok(false);
+        }
+        let _ = test_answer(&shown);
+        return Ok(true);
+    }
+    if !platform_ask_reveal(&ask)? {
+        return Ok(false);
+    }
+    platform_show(name, &shown, copy)?;
+    Ok(true)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_ask_reveal(message: &str) -> Result<bool> {
+    let script = [
+        "on run argv".to_string(),
+        format!(
+            "set r to display dialog (item 1 of argv) with title \"keymule\" \
+             buttons {{\"Cancel\", \"Show\"}} default button \"Cancel\" \
+             cancel button \"Cancel\" with icon caution giving up after {TIMEOUT_SECS}"
+        ),
+        "if gave up of r then error \"keymule-timeout\" number 2".to_string(),
+        "return button returned of r".to_string(),
+        "end run".to_string(),
+    ];
+    Ok(osascript(&script, message)? == Answer::Text("Show".into()))
+}
+
+/// An AppleScript string literal.
+#[cfg(target_os = "macos")]
+fn applescript_str(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\" & linefeed & \""),
+            '\r' => {}
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Run an AppleScript given on stdin. Secrets go this way, never as
+/// arguments: other processes, agents included, can read a command line.
+#[cfg(target_os = "macos")]
+fn osascript_stdin(script: &str, wait: bool) -> Result<()> {
+    use anyhow::Context;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("/usr/bin/osascript")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("running osascript")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(script.as_bytes())?;
+    }
+    if wait {
+        child.wait()?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn platform_show(name: &str, shown: &str, copy: Option<&str>) -> Result<()> {
+    let title = applescript_str(&format!("keymule · {name}"));
+    let mut script = format!(
+        "set r to display dialog {} with title {title} ",
+        applescript_str(shown)
+    );
+    match copy {
+        Some(v) => script.push_str(&format!(
+            "buttons {{\"Copy\", \"Done\"}} default button \"Done\" giving up after 30\n\
+             if button returned of r is \"Copy\" then set the clipboard to {}\n",
+            applescript_str(v)
+        )),
+        None => script.push_str("buttons {\"Done\"} default button \"Done\" giving up after 30\n"),
+    }
+    osascript_stdin(&script, true)?;
+    if let Some(v) = copy {
+        // Clear the clipboard in 30 seconds if it still holds the value.
+        // This runs on after keymule exits.
+        let v = applescript_str(v);
+        osascript_stdin(
+            &format!(
+                "delay 30\ntry\nif (the clipboard as text) is {v} then set the clipboard to \"\"\nend try\n"
+            ),
+            false,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_ask_reveal(_message: &str) -> Result<bool> {
+    anyhow::bail!("revealing a secret is macOS-only for now")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_show(_name: &str, _shown: &str, _copy: Option<&str>) -> Result<()> {
+    anyhow::bail!("revealing a secret is macOS-only for now")
+}
+
 #[cfg(target_os = "macos")]
 fn platform_secret(message: &str) -> Result<Answer> {
     let script = [
@@ -133,4 +255,15 @@ fn platform_secret(_message: &str) -> Result<Answer> {
 #[cfg(not(target_os = "macos"))]
 fn platform_confirm(_message: &str) -> Result<bool> {
     anyhow::bail!("the confirmation dialog is macOS-only for now; run `keymule edit` in a terminal")
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::applescript_str;
+
+    #[test]
+    fn applescript_strings_are_escaped() {
+        assert_eq!(applescript_str("a\"b\\c"), "\"a\\\"b\\\\c\"");
+        assert_eq!(applescript_str("x\ny"), "\"x\" & linefeed & \"y\"");
+    }
 }

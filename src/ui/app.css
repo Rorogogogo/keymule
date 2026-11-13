@@ -239,6 +239,8 @@ h2 { font-size: 18px; font-weight: 600; letter-spacing: -0.015em; }
 .btn:hover { background: var(--subtle); border-color: var(--ink3); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .btn.primary:hover { background: color-mix(in srgb, var(--accent) 90%, #000); }
+.btn.ghost { border-color: transparent; box-shadow: none; background: transparent; color: var(--ink2); }
+.btn.ghost:hover { background: var(--subtle); color: var(--ink); border-color: transparent; }
 .btn.link { border: 0; box-shadow: none; background: transparent; color: var(--accent); padding: 0 6px; }
 .btn.link:hover { background: var(--accent-soft); }
 .btn:disabled { opacity: 0.5; cursor: default; }
