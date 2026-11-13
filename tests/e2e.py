@@ -276,6 +276,18 @@ check("rm --dialog keeps it when the dialog says no", r.returncode != 0 and "git
 r = subprocess.run([BIN, "rm", "github-launchstory", "--dialog"], text=True, capture_output=True,
                    env=dict(env, KEYMULE_TEST_DIALOG="allow"))
 check("rm --dialog deletes it after the dialog says yes", r.returncode == 0 and "github-launchstory" not in vault_now(), r.stderr)
+third = "ghp_mnbvcxzlkjhgfdsapoiuytrewq1234567890"
+sc = subprocess.run([BIN, "hook", "scan"], env=env, text=True, capture_output=True,
+                    input=f"the pat for the acme org is {third}")
+scan = json.loads(sc.stdout)
+check("hook scan (for the mod) finds the token, masked, and suggests a name",
+      scan["found"][0]["suggested"] == "github-acme" and third not in sc.stdout, sc.stdout)
+sv = subprocess.run([BIN, "hook", "save", "--name", "gh-acme"], env=env, text=True, capture_output=True,
+                    input=f"the pat for the acme org is {third}")
+saved = json.loads(sv.stdout)
+check("hook save (for the mod) saves it and returns the message without it",
+      saved["text"] == "the pat for the acme org is [saved in keymule as `gh-acme`]"
+      and vault_now().get("gh-acme") and third not in sv.stdout, sv.stdout)
 hook(f"again {pasted}")
 out = hook("n")
 check("`n` sends the held message as it was",

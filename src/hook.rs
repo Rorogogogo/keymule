@@ -209,16 +209,36 @@ fn answer(prompt: &str, reply: Reply, store: &mut Store, vault: &dyn Vault) -> O
         }
         Reply::Save(t) => t,
     };
+    let (message, notes) = save_all(prompt, typed.as_deref(), store, vault);
+    Outcome::Context {
+        context: format!(
+            "The user's previous message was held back by keymule because it contained a secret. \
+             keymule saved it ({}); use it through keymule by that name and never ask for the \
+             value. Treat this as the user's request:\n\n{message}",
+            notes.join(", ")
+        ),
+        notice: format!(
+            "keymule saved {} and sent your message without it.",
+            notes.join(", ")
+        ),
+    }
+}
+
+/// Save every secret in `prompt` (the only one under `typed`, if given) and
+/// return the prompt with each swapped for its keymule name, plus a note per
+/// secret.
+fn save_all(
+    prompt: &str,
+    typed: Option<&str>,
+    store: &mut Store,
+    vault: &dyn Vault,
+) -> (String, Vec<String>) {
     let found = detect::scan(prompt);
     let hint = context_hint(prompt, &found);
     let mut notes = Vec::new();
     let mut message = prompt.to_string();
     for f in &found {
-        let typed = if found.len() == 1 {
-            typed.as_deref()
-        } else {
-            None
-        };
+        let typed = if found.len() == 1 { typed } else { None };
         let saved = match known_as(f, store, vault) {
             Some(n) if typed.is_none_or(|t| t == n) => Ok((n, "already saved".to_string())),
             _ => {
@@ -246,18 +266,53 @@ fn answer(prompt: &str, reply: Reply, store: &mut Store, vault: &dyn Vault) -> O
             }
         }
     }
-    Outcome::Context {
-        context: format!(
-            "The user's previous message was held back by keymule because it contained a secret. \
-             keymule saved it ({}); use it through keymule by that name and never ask for the \
-             value. Treat this as the user's request:\n\n{message}",
+    (message, notes)
+}
+
+/// `keymule hook scan`: what a prompt holds, for the Claude Code mod that
+/// asks inline. No secret values in the output: masked ones only, and the
+/// prompt with them taken out.
+pub fn scan_json(prompt: &str, store: &Store, vault: &dyn Vault) -> serde_json::Value {
+    let found = if prompt.contains(IGNORE_MARKER) {
+        vec![]
+    } else {
+        detect::scan(prompt)
+    };
+    let hint = context_hint(prompt, &found);
+    let mut stripped = prompt.to_string();
+    let items: Vec<serde_json::Value> = found
+        .iter()
+        .map(|f| {
+            stripped = stripped.replace(&f.value, "[secret removed by keymule]");
+            serde_json::json!({
+                "label": f.label.as_deref().unwrap_or("secret"),
+                "masked": crate::doctor::mask(&f.value),
+                "known": known_as(f, store, vault),
+                "suggested": suggested_name(f, store, hint.as_deref()),
+            })
+        })
+        .collect();
+    serde_json::json!({ "found": items, "stripped": stripped, "ignore_marker": IGNORE_MARKER })
+}
+
+/// `keymule hook save`: save the secrets in a prompt and return it with each
+/// swapped for its keymule name, and a note for the model.
+pub fn save_json(
+    prompt: &str,
+    name: Option<&str>,
+    store: &mut Store,
+    vault: &dyn Vault,
+) -> serde_json::Value {
+    let (text, notes) = save_all(prompt, name, store, vault);
+    serde_json::json!({
+        "text": text,
+        "saved": notes,
+        "context": format!(
+            "keymule saved the secret from this message ({}); use it through keymule by that name \
+             and never ask the user for the value.",
             notes.join(", ")
         ),
-        notice: format!(
-            "keymule saved {} and sent your message without it.",
-            notes.join(", ")
-        ),
-    }
+    })
 }
 
 /// The name a secret already has in keymule, if it's stored.
@@ -622,6 +677,29 @@ mod tests {
             Some("acme")
         );
         assert_eq!(context_hint("check my actions runs", &[]), None);
+    }
+
+    #[test]
+    fn scan_and_save_for_the_inline_question() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        let msg = format!("the pat for the acme org is {GH} thanks");
+        let scan = scan_json(&msg, &s, &v);
+        let txt = scan.to_string();
+        assert!(!txt.contains(GH), "scan output must not hold the secret");
+        assert_eq!(scan["found"][0]["suggested"], "github-acme");
+        assert_eq!(
+            scan["stripped"],
+            "the pat for the acme org is [secret removed by keymule] thanks"
+        );
+        let saved = save_json(&msg, Some("gh-acme"), &mut s, &v);
+        assert_eq!(
+            saved["text"],
+            "the pat for the acme org is [saved in keymule as `gh-acme`] thanks"
+        );
+        assert!(!saved.to_string().contains(GH));
+        assert_eq!(Sealed::peek_secret(&v, "gh-acme").unwrap(), GH);
+        assert_eq!(scan_json(&msg, &s, &v)["found"][0]["known"], "gh-acme");
     }
 
     #[test]
