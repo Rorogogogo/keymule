@@ -257,7 +257,9 @@ pub trait Vault {
     fn delete(&self, name: &str) -> Result<()>;
 }
 
-/// macOS Keychain / Windows Credential Manager / Secret Service.
+/// macOS Keychain / Windows Credential Manager / Secret Service, one item
+/// per secret: how keymule stored secrets before `vault.rs`, and still the
+/// place the vault's key lives.
 pub struct Keychain;
 
 impl Vault for Keychain {
@@ -281,14 +283,18 @@ impl Vault for Keychain {
     }
 }
 
-/// The secret store to use. Debug builds can point `KEYMULE_TEST_VAULT` at
-/// a JSON file for end-to-end tests; release builds always use the keychain.
+/// The secret store to use: keymule's encrypted file, keyed by the keychain
+/// (see `vault.rs`). Debug builds can point `KEYMULE_TEST_VAULT` at a plain
+/// JSON file for end-to-end tests.
 pub fn vault() -> Box<dyn Vault> {
     #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os("KEYMULE_TEST_VAULT") {
         return Box::new(FileVault(PathBuf::from(path)));
     }
-    Box::new(Keychain)
+    match config_dir() {
+        Ok(dir) => Box::new(crate::vault::EncVault::open_default(dir)),
+        Err(_) => Box::new(Keychain),
+    }
 }
 
 #[cfg(debug_assertions)]

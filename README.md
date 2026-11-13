@@ -13,7 +13,7 @@ You ask Claude Code to check a Bamboo pipeline, so you paste your token into the
 now sits in the model provider's logs and in your transcript files, so you should rotate it. Next
 week you paste a new one, and the cycle repeats.
 
-keymule breaks the cycle. Tokens live in your OS keychain. The agent asks keymule to make the
+keymule breaks the cycle. Tokens live in an encrypted vault whose key is in your OS keychain. The agent asks keymule to make the
 call, keymule attaches the token itself, and the agent only ever sees the response.
 
 ```text
@@ -157,6 +157,7 @@ up to `settings.json.keymule-bak`.
 | `keymule rotate <name> [--dialog]` | Replace the secret after rotating it |
 | `keymule reveal <name>` | Show a secret in a macOS window after you agree (never printed, so agents running it can't read it); Copy clears the clipboard after 30 s |
 | `keymule test <name>` | Check the credential still works |
+| `keymule migrate` | Move secrets from an older keymule's keychain items into the encrypted vault |
 | `keymule rm <name> [--dialog]` | Delete it (asks you first, on the terminal or in a dialog; the web page's Delete uses the dialog) |
 | `keymule presets` | List service presets |
 | `keymule doctor [--all] [--json] [--dir D]` | Find leaked and plain-text secrets |
@@ -193,12 +194,17 @@ paste-to-save hook is Claude Code only for now.
 
 | What | Where |
 |---|---|
-| Secrets, with their allowed hosts, auth scheme and (for MCP servers) allowed commands | OS keychain (macOS Keychain, Windows Credential Manager, Secret Service), service `keymule` |
-| Readable index | `~/.config/keymule/credentials.toml`: names, URLs, descriptions. No secrets, and not trusted: if it disagrees with the keychain, the keychain wins and `keymule list` warns you |
+| Secrets, with their allowed hosts, auth scheme and (for MCP servers) allowed commands | `~/.config/keymule/vault.enc`, encrypted with XChaCha20-Poly1305, readable only by you |
+| The vault's key | One item in the OS keychain (macOS Keychain, Windows Credential Manager, Secret Service): service `keymule`, account `vault-key`. Without a keychain (some Linux, WSL, CI), set `KEYMULE_PASSPHRASE` and the key is derived from it with Argon2id |
+| Readable index | `~/.config/keymule/credentials.toml`: names, URLs, descriptions. No secrets, and not trusted: if it disagrees with the vault, the vault wins and `keymule list` warns you |
 | Audit log | `~/.config/keymule/audit.log`: one line per request, and one when an adopted MCP server starts |
 
-On macOS, the keychain only hands keymule's items to keymule itself. Another process (say, an
-agent running `security find-generic-password`) triggers a system prompt you have to approve.
+On macOS, the keychain only hands the vault's key to keymule itself. Another process (say, an
+agent running `security find-generic-password`) triggers a system prompt you have to approve, and
+the vault file is useless without that key. Because there's one keychain item, not one per
+secret, macOS asks about it once. No admin rights are needed: the key sits in your own login
+keychain. Secrets an older keymule kept as separate keychain items move into the vault the first
+time they're used, or all at once with `keymule migrate`.
 
 ---
 
@@ -209,7 +215,7 @@ agent running `security find-generic-password`) triggers a system prompt you hav
 - HTTP APIs only. Database, SSH and cloud CLI credentials are on the roadmap.
 - The secure dialog is macOS-only for now; elsewhere use `keymule add` in a terminal.
 - The agent picks the URL in `add_credential`, so read the host in the dialog before typing your token.
-- Unsigned builds make macOS ask for keychain access again after each rebuild. Building from source on a Mac, `scripts/install-macos.sh` signs the binary with a local certificate so "Always Allow" sticks (setup steps are in the script).
+- Unsigned builds make macOS ask for access to the vault key again after each rebuild (once, not once per secret). Building from source on a Mac, `scripts/install-macos.sh` signs the binary with a local certificate so "Always Allow" sticks (setup steps are in the script).
 - `keymule ui` never sees a secret, but anything that can read your terminal output can open it with the link it prints.
 - `keymule reveal` asks before it shows anything, but the value is then on your screen: anyone watching it or recording it sees it, and Copy puts it on the clipboard for 30 seconds.
 - `keymule remote` speaks Streamable HTTP, not the older SSE-only transport. Keys in a URL's query string aren't adopted.
@@ -223,6 +229,7 @@ agent running `security find-generic-password`) triggers a system prompt you hav
 - **0.4**: ✅ `add_mcp_secret`, approval for new server commands, pasted database URLs
 - **0.5**: ✅ `keymule remote` for HTTP MCP servers' key headers
 - **0.6**: ✅ `keymule ui`, a local web page; `keymule reveal`
+- **0.7**: ✅ one encrypted vault, one keychain item (passphrase where there's no keychain); paste hook asks inline through the Claude Code mod
 - **Next**: more presets, database auth proxy, SSH agent, git/docker/AWS credential helpers
 - **Later**: Touch ID approval for sensitive credentials, short-lived credentials (AWS STS, GitHub App tokens)
 

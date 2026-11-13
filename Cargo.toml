@@ -1,8 +1,8 @@
 [package]
 name = "keymule"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Let AI coding agents use your API tokens and passwords without ever seeing them"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rorogogogo/keymule"
@@ -18,7 +18,11 @@ codegen-units = 1
 
 [dependencies]
 anyhow = "1.0.104"
+argon2 = "0.6.0"
+base64 = "0.23.1"
+chacha20poly1305 = "0.11.0"
 clap = { version = "4.6.7", features = ["derive"] }
+getrandom = "0.4.3"
 keyring = "4.2.0"
 regex = "1.13.1"
 reqwest = { version = "0.13.5", features = ["json"] }
