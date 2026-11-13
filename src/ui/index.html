@@ -4,56 +4,77 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>keymule</title>
-  <link rel="icon" href="data:,">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%231a1f36'/%3E%3Ccircle cx='12' cy='9.6' r='3.3' fill='%23fff'/%3E%3Cpath d='M10.3 11.8 9.4 17.6h5.2l-.9-5.8z' fill='%23fff'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-  <header class="top">
-    <span class="brand">keymule</span>
-    <span class="sep" aria-hidden="true"></span>
-    <span id="meta" class="meta"></span>
-    <span class="grow"></span>
-    <span id="live" class="meta"></span>
-  </header>
-
-  <main class="main">
-    <section class="col">
-      <div id="banner"></div>
-
-      <div class="sh"><span class="label">Credentials<span id="ncreds" class="count"></span></span></div>
-      <div id="creds"></div>
-      <form id="add" class="row addrow" autocomplete="off">
-        <span class="mark none" aria-hidden="true"></span>
-        <select id="svc" class="field" aria-label="Service">
-          <option value="github">GitHub</option>
-          <option value="gitlab">GitLab</option>
-          <option value="bamboo">Bamboo</option>
-          <option value="jenkins">Jenkins</option>
-          <option value="generic">Any HTTP API</option>
-        </select>
-        <input id="url" class="field mono url" type="url" spellcheck="false" aria-label="Base URL">
-        <button class="btn" type="submit">Add…</button>
-      </form>
-      <div class="hint">You type the token into a keymule dialog, never into this page.</div>
-
-      <div class="sh"><span class="label">MCP servers<span id="nservers" class="count"></span></span></div>
-      <div id="servers"></div>
-
-      <div class="sh">
-        <span class="label">Leaks</span>
-        <button id="scan" class="btn ghost" type="button">Scan</button>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brandline">
+        <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" class="logo-bg"/><circle cx="12" cy="9.6" r="3.3" class="logo-fg"/><path d="M10.3 11.8 9.4 17.6h5.2l-.9-5.8z" class="logo-fg"/></svg>
+        <span class="brand">keymule</span>
+        <button id="collapse" class="iconbtn" type="button" title="Collapse sidebar" aria-label="Collapse sidebar"></button>
       </div>
-      <div id="leaks"></div>
-    </section>
-
-    <section class="col side">
-      <div class="sh">
-        <span class="label">Activity</span>
-        <span id="filter"></span>
+      <nav id="nav" class="nav" aria-label="Sections"></nav>
+      <div class="sidefoot">
+        <button id="theme" class="navbtn" type="button"></button>
+        <div class="status">
+          <span id="live" class="live"></span>
+          <span id="version" class="muted"></span>
+        </div>
       </div>
-      <div id="activity"></div>
-    </section>
-  </main>
+    </aside>
+
+    <main id="main" class="main">
+      <header class="ph">
+        <div>
+          <h1 id="ptitle"></h1>
+          <p id="psub"></p>
+        </div>
+      </header>
+
+      <div id="stats" class="stats" data-in="overview"></div>
+      <div id="banner" data-in="overview credentials servers"></div>
+
+      <div class="grid">
+        <div class="colA">
+          <section class="sec" data-in="overview credentials">
+            <div class="sh"><h2>Credentials</h2><span id="ncreds" class="count"></span></div>
+            <div id="creds" class="table"></div>
+            <form id="add" class="addline" autocomplete="off">
+              <select id="svc" class="field" aria-label="Service">
+                <option value="github">GitHub</option>
+                <option value="gitlab">GitLab</option>
+                <option value="bamboo">Bamboo</option>
+                <option value="jenkins">Jenkins</option>
+                <option value="generic">Any HTTP API</option>
+              </select>
+              <input id="url" class="field url" type="url" spellcheck="false" aria-label="Base URL">
+              <button class="btn" type="submit">Add credential</button>
+            </form>
+            <p class="note">You type the token into a keymule dialog, never into this page.</p>
+          </section>
+
+          <section class="sec" data-in="overview servers">
+            <div class="sh"><h2>MCP servers</h2><span id="nservers" class="count"></span></div>
+            <div id="servers" class="table"></div>
+          </section>
+        </div>
+
+        <div class="colB">
+          <section class="sec" data-in="overview activity">
+            <div class="sh"><h2>Activity</h2><span id="filter" class="grow"></span><button id="allact" class="btn link" type="button" data-in="overview">View all</button></div>
+            <div id="activity" class="table acts"></div>
+          </section>
+
+          <section class="sec" data-in="overview leaks">
+            <div class="sh"><h2>Leak check</h2><span class="grow"></span><button id="scan" class="btn" type="button">Scan</button></div>
+            <div id="leaks"></div>
+          </section>
+        </div>
+      </div>
+    </main>
+  </div>
 
   <div id="toast" role="status" hidden></div>
   <script src="/app.js"></script>
