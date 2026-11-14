@@ -160,25 +160,18 @@ pub fn install(
             let off_host = if sealed.hosts.contains(host) {
                 String::new()
             } else {
-                format!(
-                    "\n\nNote: \"{name}\" was saved for {}.",
-                    sealed.hosts.join(", ")
-                )
+                format!(" It was saved for {}.", sealed.hosts.join(", "))
             };
             format!(
-                "Let git use \"{name}\" for {host} as {username}?\n\n\
-                 keymule copies it into git's credential store ({}) and keeps the copy in step: \
-                 rotating updates it, deleting removes it.{}{off_host}\n\n\
-                 Other programs you run could then ask git for it. keymule stops agents from \
-                 doing that, as far as it can.",
-                helpers.join(", "),
+                "Let git use \"{name}\" for {host}?\n\n\
+                 Signs in as {username}. keymule keeps git's copy up to date.{}{off_host}",
                 cli_line.map(|l| format!(" {l}")).unwrap_or_default(),
             )
         } else {
             let (tool, g) = new_cli.as_ref().expect("checked");
             format!(
-                "Let {tool} use \"{name}\" in {}?\n\nGit already has it for {host} as \
-                 {username}. keymule hides the token in {tool}'s output.",
+                "Let {tool} use \"{name}\" in {}?\n\nGit already has it for {host}. \
+                 keymule hides it from the output.",
                 tilde(Path::new(&g.dir))
             )
         };
@@ -364,7 +357,8 @@ mod tests {
         assert_eq!(asked.borrow().len(), 1);
         let q = asked.borrow()[0].clone();
         assert!(
-            q.starts_with("Let git use \"github-acme\" for github.com as acme-bot?"),
+            q.starts_with("Let git use \"github-acme\" for github.com?")
+                && q.contains("Signs in as acme-bot."),
             "{q}"
         );
         assert!(

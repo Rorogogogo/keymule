@@ -1,7 +1,11 @@
 //! Native dialogs shown by keymule itself, so the user can type a secret
-//! or approve a change without it passing through the agent. The text goes
-//! to AppleScript as an argument, never spliced into the script, so names
-//! and URLs chosen by an agent cannot inject AppleScript.
+//! or approve a change without it passing through the agent.
+//!
+//! On macOS each one is a small window showing src/dialog.html, opened by
+//! src/dialog.js under `osascript -l JavaScript`. Its text goes in as a JSON
+//! literal on stdin, never as script source or a command-line argument, and
+//! the page sets it with textContent, so names and URLs chosen by an agent
+//! can't inject code, and other processes can't read it.
 
 use anyhow::Result;
 
@@ -18,31 +22,104 @@ pub enum Answer {
 const TIMEOUT_SECS: u32 = 180;
 
 #[cfg(target_os = "macos")]
-fn osascript(lines: &[String], message: &str) -> Result<Answer> {
-    use anyhow::Context;
-    let mut cmd = std::process::Command::new("/usr/bin/osascript");
-    for line in lines {
-        cmd.arg("-e").arg(line);
+const SCRIPT: &str = include_str!("dialog.js");
+
+#[cfg(target_os = "macos")]
+const PAGE: &str = include_str!("dialog.html");
+
+/// What a dialog shows. `message` is split into a bold headline (its first
+/// paragraph) and the text below; lines indented by 8 spaces show as code.
+#[cfg(target_os = "macos")]
+#[derive(serde::Serialize)]
+struct Spec<'a> {
+    title: &'a str,
+    body: &'a str,
+    /// "key", "unlock", "trash", "eye" or "shield".
+    icon: &'a str,
+    /// "" (the accent colour), "warn" or "bad".
+    tone: &'a str,
+    /// Left to right.
+    buttons: &'a [&'a str],
+    /// The filled button.
+    primary: &'a str,
+    /// Return presses it.
+    default: &'a str,
+    /// Escape presses it.
+    cancel: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    destructive: Option<&'a str>,
+    secure: bool,
+    timeout: u32,
+}
+
+#[cfg(target_os = "macos")]
+impl<'a> Spec<'a> {
+    /// Buttons left to right: the first cancels and is the default, the
+    /// last is filled.
+    fn new(message: &'a str, icon: &'a str, tone: &'a str, buttons: &'a [&'a str]) -> Self {
+        let (title, body) = message.split_once("\n\n").unwrap_or((message, ""));
+        Spec {
+            title,
+            body,
+            icon,
+            tone,
+            buttons,
+            primary: buttons[buttons.len() - 1],
+            default: buttons[0],
+            cancel: buttons[0],
+            destructive: None,
+            secure: false,
+            timeout: TIMEOUT_SECS,
+        }
     }
-    let out = cmd
-        .arg(message)
-        .stdin(std::process::Stdio::null())
-        .output()
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, serde::Deserialize)]
+struct Picked {
+    button: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// Show the alert and wait. None if nobody answered in time.
+#[cfg(target_os = "macos")]
+fn alert(spec: &Spec) -> Result<Option<Picked>> {
+    use anyhow::Context;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let script = format!(
+        "{SCRIPT}\nfunction run() {{ return show({}, {}); }}\n",
+        serde_json::to_string(spec)?,
+        serde_json::to_string(PAGE)?
+    );
+    let mut child = Command::new("/usr/bin/osascript")
+        .args(["-l", "JavaScript", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("running osascript")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(script.as_bytes())?;
+    }
+    let out = child.wait_with_output()?;
     if out.status.success() {
-        let text = String::from_utf8_lossy(&out.stdout);
-        return Ok(Answer::Text(
-            text.trim_end_matches(['\n', '\r']).to_string(),
-        ));
+        let picked = serde_json::from_slice(&out.stdout).context("reading the dialog's answer")?;
+        return Ok(Some(picked));
     }
     let err = String::from_utf8_lossy(&out.stderr);
-    if err.contains("(-128)") {
-        Ok(Answer::Cancelled)
-    } else if err.contains("keymule-timeout") {
-        Ok(Answer::TimedOut)
+    if err.contains("keymule-timeout") {
+        Ok(None)
     } else {
         anyhow::bail!("dialog failed: {}", err.trim())
     }
+}
+
+/// The button the user clicked, "" if the dialog timed out.
+#[cfg(target_os = "macos")]
+fn pick(spec: &Spec) -> Result<String> {
+    Ok(alert(spec)?.map(|p| p.button).unwrap_or_default())
 }
 
 /// Debug builds only: `KEYMULE_TEST_DIALOG` answers dialogs ("cancel",
@@ -91,18 +168,11 @@ pub fn confirm_delete(message: &str) -> Result<bool> {
 
 #[cfg(target_os = "macos")]
 fn platform_confirm_delete(message: &str) -> Result<bool> {
-    let script = [
-        "on run argv".to_string(),
-        format!(
-            "set r to display dialog (item 1 of argv) with title \"keymule\" \
-             buttons {{\"Cancel\", \"Delete\"}} default button \"Cancel\" \
-             cancel button \"Cancel\" with icon caution giving up after {TIMEOUT_SECS}"
-        ),
-        "if gave up of r then error \"keymule-timeout\" number 2".to_string(),
-        "return button returned of r".to_string(),
-        "end run".to_string(),
-    ];
-    Ok(osascript(&script, message)? == Answer::Text("Delete".into()))
+    let spec = Spec {
+        destructive: Some("Delete"),
+        ..Spec::new(message, "trash", "bad", &["Cancel", "Delete"])
+    };
+    Ok(pick(&spec)? == "Delete")
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -110,7 +180,7 @@ fn platform_confirm_delete(_message: &str) -> Result<bool> {
     anyhow::bail!("the confirmation dialog is macOS-only for now; run `keymule rm` in a terminal")
 }
 
-/// Ask the user to allow something. Defaults to "Don't Allow".
+/// Ask the user to allow something. Return and Escape both cancel.
 pub fn confirm(message: &str) -> Result<bool> {
     if let Some(a) = test_answer(message) {
         return Ok(a == "allow");
@@ -118,8 +188,8 @@ pub fn confirm(message: &str) -> Result<bool> {
     platform_confirm(message)
 }
 
-/// The allow-all dialog: Don't Allow / Allow for Today / Allow Until I Turn
-/// It Off. Test answers: "today", "allow" (until off), anything else is no.
+/// The allow-all dialog: Cancel / Today / Always (Return picks Always).
+/// Test answers: "today", "allow" (until off), anything else is no.
 pub fn allow_all(message: &str) -> Result<Option<crate::trust::Span>> {
     use crate::trust::Span;
     let pick = match test_answer(message) {
@@ -127,30 +197,20 @@ pub fn allow_all(message: &str) -> Result<Option<crate::trust::Span>> {
         None => platform_allow_all(message)?,
     };
     Ok(match pick.as_str() {
-        "today" | "Allow for Today" => Some(Span::Today),
-        "allow" | "Allow Until I Turn It Off" => Some(Span::UntilOff),
+        "today" | "Today" => Some(Span::Today),
+        "allow" | "Always" => Some(Span::UntilOff),
         _ => None,
     })
 }
 
 #[cfg(target_os = "macos")]
 fn platform_allow_all(message: &str) -> Result<String> {
-    let script = [
-        "on run argv".to_string(),
-        format!(
-            "set r to display dialog (item 1 of argv) with title \"keymule\" \
-             buttons {{\"Don't Allow\", \"Allow for Today\", \"Allow Until I Turn It Off\"}} \
-             default button \"Don't Allow\" cancel button \"Don't Allow\" with icon caution \
-             giving up after {TIMEOUT_SECS}"
-        ),
-        "if gave up of r then error \"keymule-timeout\" number 2".to_string(),
-        "return button returned of r".to_string(),
-        "end run".to_string(),
-    ];
-    Ok(match osascript(&script, message)? {
-        Answer::Text(t) => t,
-        _ => String::new(),
-    })
+    // Return picks Always: the user asked for this switch.
+    let spec = Spec {
+        default: "Always",
+        ..Spec::new(message, "unlock", "warn", &["Cancel", "Today", "Always"])
+    };
+    pick(&spec)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -166,8 +226,8 @@ pub enum PasteChoice {
     DontSend,
 }
 
-/// Ask what to do with a pasted secret: Don't Send / Send As Is / Save in
-/// keymule (the default). None if no dialog could be shown or it timed
+/// Ask what to do with a pasted secret: Don't Send / Send Anyway / Save
+/// (the default). None if no dialog could be shown or it timed
 /// out. Test answers: "save" or "allow", "send", anything else is don't.
 pub fn paste_choice(message: &str) -> Option<PasteChoice> {
     let pick = match test_answer(message) {
@@ -175,8 +235,8 @@ pub fn paste_choice(message: &str) -> Option<PasteChoice> {
         None => platform_paste_choice(message).ok()?,
     };
     match pick.as_str() {
-        "save" | "allow" | "Save in keymule" => Some(PasteChoice::Save),
-        "send" | "Send As Is" => Some(PasteChoice::SendAsIs),
+        "save" | "allow" | "Save" => Some(PasteChoice::Save),
+        "send" | "Send Anyway" => Some(PasteChoice::SendAsIs),
         "" => None,
         _ => Some(PasteChoice::DontSend),
     }
@@ -184,23 +244,16 @@ pub fn paste_choice(message: &str) -> Option<PasteChoice> {
 
 #[cfg(target_os = "macos")]
 fn platform_paste_choice(message: &str) -> Result<String> {
-    let script = [
-        "on run argv".to_string(),
-        format!(
-            "set r to display dialog (item 1 of argv) with title \"keymule\" \
-             buttons {{\"Don't Send\", \"Send As Is\", \"Save in keymule\"}} \
-             default button \"Save in keymule\" cancel button \"Don't Send\" with icon caution \
-             giving up after {TIMEOUT_SECS}"
-        ),
-        "if gave up of r then error \"keymule-timeout\" number 2".to_string(),
-        "return button returned of r".to_string(),
-        "end run".to_string(),
-    ];
-    Ok(match osascript(&script, message)? {
-        Answer::Text(t) => t,
-        Answer::Cancelled => "Don't Send".into(),
-        Answer::TimedOut => String::new(),
-    })
+    let spec = Spec {
+        default: "Save",
+        ..Spec::new(
+            message,
+            "shield",
+            "warn",
+            &["Don't Send", "Send Anyway", "Save"],
+        )
+    };
+    pick(&spec)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -223,10 +276,7 @@ pub fn reveal(
         .map(|(k, v)| format!("{k}\n{v}"))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let ask = format!(
-        "Show the secret for \"{name}\" on screen?\n\nAnyone who can see your screen, or a \
-         screen recording, will see it. The window closes after 30 seconds."
-    );
+    let ask = format!("Show \"{name}\" on screen?\n\nIt closes after 30 seconds.");
     let question = ask;
     let ask = ask_first;
     if let Some(a) = test_answer(&question) {
@@ -239,24 +289,13 @@ pub fn reveal(
     if ask && !platform_ask_reveal(&question)? {
         return Ok(false);
     }
-    platform_show(name, &shown, copy)?;
+    platform_show(name, items, copy)?;
     Ok(true)
 }
 
 #[cfg(target_os = "macos")]
 fn platform_ask_reveal(message: &str) -> Result<bool> {
-    let script = [
-        "on run argv".to_string(),
-        format!(
-            "set r to display dialog (item 1 of argv) with title \"keymule\" \
-             buttons {{\"Cancel\", \"Show\"}} default button \"Cancel\" \
-             cancel button \"Cancel\" with icon caution giving up after {TIMEOUT_SECS}"
-        ),
-        "if gave up of r then error \"keymule-timeout\" number 2".to_string(),
-        "return button returned of r".to_string(),
-        "end run".to_string(),
-    ];
-    Ok(osascript(&script, message)? == Answer::Text("Show".into()))
+    Ok(pick(&Spec::new(message, "eye", "warn", &["Cancel", "Show"]))? == "Show")
 }
 
 /// An AppleScript string literal.
@@ -299,32 +338,47 @@ fn osascript_stdin(script: &str, wait: bool) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn platform_show(name: &str, shown: &str, copy: Option<&str>) -> Result<()> {
-    let title = applescript_str(&format!("keymule · {name}"));
-    let mut script = format!(
-        "set r to display dialog {} with title {title} ",
-        applescript_str(shown)
-    );
-    match copy {
-        Some(v) => script.push_str(&format!(
-            "buttons {{\"Copy\", \"Done\"}} default button \"Done\" giving up after 30\n\
-             if button returned of r is \"Copy\" then set the clipboard to {}\n",
+fn platform_show(name: &str, items: &[(String, String)], copy: Option<&str>) -> Result<()> {
+    // Each value as code under its label. The values travel on stdin only.
+    let mut message = format!("keymule · {name}");
+    for (k, v) in items {
+        message.push_str(&format!("\n\n{k}\n\n"));
+        let code: Vec<String> = v.lines().map(|l| format!("        {l}")).collect();
+        message.push_str(&code.join("\n"));
+    }
+    let buttons: &[&str] = if copy.is_some() {
+        &["Copy", "Done"]
+    } else {
+        &["Done"]
+    };
+    let spec = Spec {
+        default: "Done",
+        cancel: "Done",
+        timeout: 30,
+        ..Spec::new(&message, "eye", "", buttons)
+    };
+    if pick(&spec)? != "Copy" {
+        return Ok(());
+    }
+    let Some(v) = copy else { return Ok(()) };
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut pb = Command::new("/usr/bin/pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = pb.stdin.take() {
+        stdin.write_all(v.as_bytes())?;
+    }
+    pb.wait()?;
+    // Clear the clipboard in 30 seconds if it still holds the value. This
+    // runs on after keymule exits; the value goes in on stdin.
+    osascript_stdin(
+        &format!(
+            "delay 30\ntry\nif (the clipboard as text) is {} then set the clipboard to \"\"\nend try\n",
             applescript_str(v)
-        )),
-        None => script.push_str("buttons {\"Done\"} default button \"Done\" giving up after 30\n"),
-    }
-    osascript_stdin(&script, true)?;
-    if let Some(v) = copy {
-        // Clear the clipboard in 30 seconds if it still holds the value.
-        // This runs on after keymule exits.
-        let v = applescript_str(v);
-        osascript_stdin(
-            &format!(
-                "delay 30\ntry\nif (the clipboard as text) is {v} then set the clipboard to \"\"\nend try\n"
-            ),
-            false,
-        )?;
-    }
+        ),
+        false,
+    )?;
     Ok(())
 }
 
@@ -334,44 +388,31 @@ fn platform_ask_reveal(_message: &str) -> Result<bool> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_show(_name: &str, _shown: &str, _copy: Option<&str>) -> Result<()> {
+fn platform_show(_name: &str, _items: &[(String, String)], _copy: Option<&str>) -> Result<()> {
     anyhow::bail!("revealing a secret is macOS-only for now")
 }
 
 #[cfg(target_os = "macos")]
 fn platform_secret(message: &str) -> Result<Answer> {
-    let script = [
-        "on run argv".to_string(),
-        format!(
-            "set r to display dialog (item 1 of argv) default answer \"\" with hidden answer \
-             with title \"keymule\" buttons {{\"Cancel\", \"Save\"}} default button \"Save\" \
-             cancel button \"Cancel\" with icon caution giving up after {TIMEOUT_SECS}"
-        ),
-        "if gave up of r then error \"keymule-timeout\" number 2".to_string(),
-        "return text returned of r".to_string(),
-        "end run".to_string(),
-    ];
-    Ok(match osascript(&script, message)? {
-        Answer::Text(t) if t.trim().is_empty() => Answer::Cancelled,
-        Answer::Text(t) => Answer::Text(t.trim().to_string()),
-        other => other,
+    let spec = Spec {
+        default: "Save",
+        cancel: "Cancel",
+        secure: true,
+        ..Spec::new(message, "key", "", &["Cancel", "Save"])
+    };
+    Ok(match alert(&spec)? {
+        None => Answer::TimedOut,
+        Some(p) if p.button != "Save" => Answer::Cancelled,
+        Some(p) => match p.text.unwrap_or_default().trim() {
+            "" => Answer::Cancelled,
+            t => Answer::Text(t.to_string()),
+        },
     })
 }
 
 #[cfg(target_os = "macos")]
 fn platform_confirm(message: &str) -> Result<bool> {
-    let script = [
-        "on run argv".to_string(),
-        format!(
-            "set r to display dialog (item 1 of argv) with title \"keymule\" \
-             buttons {{\"Don't Allow\", \"Allow\"}} default button \"Don't Allow\" \
-             cancel button \"Don't Allow\" with icon caution giving up after {TIMEOUT_SECS}"
-        ),
-        "if gave up of r then error \"keymule-timeout\" number 2".to_string(),
-        "return button returned of r".to_string(),
-        "end run".to_string(),
-    ];
-    Ok(osascript(&script, message)? == Answer::Text("Allow".into()))
+    Ok(pick(&Spec::new(message, "key", "", &["Cancel", "Allow"]))? == "Allow")
 }
 
 #[cfg(not(target_os = "macos"))]

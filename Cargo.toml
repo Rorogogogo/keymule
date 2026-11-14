@@ -1,6 +1,6 @@
 [package]
 name = "keymule"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Let AI coding agents use your API tokens and passwords without ever seeing them"

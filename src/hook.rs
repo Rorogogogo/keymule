@@ -263,15 +263,13 @@ fn choice_question(agent: Agent, found: &[detect::Found]) -> String {
         format!("{} secrets: {}", found.len(), list.join(", "))
     };
     let then = if agent == Agent::Cursor {
-        "keymule gives your message back with the secret's name in its place, to send"
+        "you get your message back to send"
     } else {
-        "type y to send your message with the secret's name in its place"
+        "type y to send your message"
     };
     format!(
         "Your message to {who} has {what}.\n\n\
-         Save in keymule: keymule keeps it and {who} never sees it. Then {then}.\n\
-         Send As Is: {who} gets the secret.\n\
-         Don't Send: nothing is sent."
+         Save it in keymule and {who} sees only its name. Then {then}."
     )
 }
 
@@ -1225,7 +1223,7 @@ mod tests {
     fn codex_asks_with_a_choice_instead_of_stopping_with_text() {
         let (_d, mut s) = store();
         let v = MemVault::default();
-        // Send As Is: no stop at all.
+        // Send Anyway: no stop at all.
         let j = codex(GH, "c1", &mut s, &v, Some(PasteChoice::SendAsIs));
         assert!(j.is_null(), "{j}");
         assert!(s.creds.is_empty());

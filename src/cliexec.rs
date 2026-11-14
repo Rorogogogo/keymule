@@ -285,14 +285,11 @@ pub fn prepare_in(
     } else if !granted {
         let tool = file_name(&path);
         let allowed = confirm(&format!(
-            "Let {tool} use \"{name}\" in {}?\n\n\
-             It gets the token as {}; keymule hides it in {tool}'s output. You won't be asked \
-             again for {tool} in this folder.\n\n\
-             Command:  {}\nProgram:  {}",
-            tilde(&dir),
-            vars.join(", "),
+            "Let {tool} use \"{name}\"?\n\n        {}\n\n\
+             As {} in {}. keymule hides it from the output.",
             argv.join(" "),
-            tilde(&path),
+            vars.join(", "),
+            tilde(&dir),
         ))
         .context("keymule needs to ask you about a new program, but can't show a dialog here")?;
         if !allowed {

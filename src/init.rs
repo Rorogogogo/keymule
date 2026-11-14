@@ -152,6 +152,28 @@ pub fn run(dry_run: bool) -> Result<()> {
     for line in setup_others(&home, &exe_s, &detect(&home), dry_run)? {
         println!("{line}");
     }
+
+    // 4. Allow all, offered once on first setup (Always is the default).
+    println!("\nAllow all");
+    if dry_run {
+        println!("would offer allow-all for ~ (first setup only)");
+    } else {
+        let vault = crate::store::vault();
+        match crate::trust::offer_once(vault.as_ref(), &home) {
+            Ok(Some(a)) => say(
+                &format!(
+                    "allow all is on in {}, {}",
+                    crate::cliexec::tilde(Path::new(&a.dir)),
+                    crate::trust::until_text(&a)
+                ),
+                "",
+            ),
+            Ok(None) => println!(
+                "· keymule asks before each use (turn allow-all on any time: keymule allow --dir ~)"
+            ),
+            Err(e) => println!("· couldn't offer allow-all ({e}); run: keymule allow --dir ~"),
+        }
+    }
     if !dry_run {
         println!("\nRestart your agents so they pick up keymule, then try: keymule add bamboo");
     }

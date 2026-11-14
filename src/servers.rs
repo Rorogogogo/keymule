@@ -151,9 +151,8 @@ fn approve(name: &str, binding: &Binding, argv: &[String]) -> Result<()> {
         format!(" ({})", vars.join(", "))
     };
     let allowed = crate::trust::confirm(&format!(
-        "An MCP server wants to start with your keymule secret \"{name}\"{what}.\n\n\
-         Command:\n\n        {}\n\n\
-         Only allow this if you set up this server.",
+        "Start this MCP server with \"{name}\"{what}?\n\n        {}\n\n\
+         Only allow it if you set it up.",
         argv.join(" ")
     ))
     .context("keymule needs to ask you about a new command, but can't show a dialog here")?;
@@ -170,9 +169,8 @@ fn approve(name: &str, binding: &Binding, argv: &[String]) -> Result<()> {
 pub fn approve_url(name: &str, binding: &Binding, url: &str) -> Result<()> {
     let headers: Vec<&str> = binding.headers.keys().map(String::as_str).collect();
     let allowed = crate::trust::confirm(&format!(
-        "A remote MCP server wants your keymule secret \"{name}\" ({} header).\n\n\
-         It would be sent to:\n\n        {url}\n\n\
-         Only allow this if you set up this server.",
+        "Send \"{name}\" ({} header) to this MCP server?\n\n        {url}\n\n\
+         Only allow it if you set it up.",
         headers.join(", ")
     ))
     .context("keymule needs to ask you about a new URL, but can't show a dialog here")?;
