@@ -3,6 +3,9 @@
 //! `beforeShellExecution`). It stops the commands that read a token back out
 //! of git's or gh's store, the macOS keychain, or their plain-text files.
 //!
+//! Heredoc bodies are skipped (they're data, like a README being written),
+//! unless the heredoc is fed to a shell.
+//!
 //! It always blocks them, whether or not keymule installed anything there:
 //! the hook would otherwise need to read keymule's store on every command,
 //! and an agent rarely has a good reason to print a stored password. It
@@ -58,10 +61,45 @@ static RULES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
 
 /// Why `command` is blocked, or None to let it run.
 pub fn blocked(command: &str) -> Option<&'static str> {
+    let command = strip_heredocs(command);
     RULES
         .iter()
-        .find(|(re, _)| re.is_match(command))
+        .find(|(re, _)| re.is_match(&command))
         .map(|(_, why)| *why)
+}
+
+static HEREDOC: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?"#).expect("valid"));
+static SHELL_START: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|[|;&(]\s*)(?:\S*/)?(?:sh|bash|zsh|dash|ksh|fish)\b[^|;&]*$").expect("valid")
+});
+
+/// `command` without the bodies of its heredocs: text written to a file or
+/// fed to a program as data (a README that mentions `gh auth token` is not
+/// running it). A heredoc fed to a shell runs, so that one is kept.
+fn strip_heredocs(command: &str) -> String {
+    let mut out = String::new();
+    let mut lines = command.lines();
+    while let Some(line) = lines.next() {
+        out.push_str(line);
+        out.push('\n');
+        let Some(m) = HEREDOC.captures(line) else {
+            continue;
+        };
+        let before = &line[..m.get(0).expect("match").start()];
+        if SHELL_START.is_match(before) {
+            continue;
+        }
+        let end = &m[1];
+        for body in lines.by_ref() {
+            if body.trim_start_matches('\t') == end {
+                out.push_str(body);
+                out.push('\n');
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// The shell command in a hook's input: `tool_input.command` (a string,
@@ -152,6 +190,23 @@ mod tests {
         ] {
             assert!(blocked(c).is_none(), "{c}");
         }
+    }
+
+    #[test]
+    fn text_in_a_heredoc_is_data_unless_a_shell_runs_it() {
+        let doc = "cat > notes.md <<'EOF'\nNever run gh auth token or git credential fill.\nSee ~/.git-credentials.\nEOF\ngit add notes.md";
+        assert!(blocked(doc).is_none(), "{doc}");
+        let py = "python3 - <<'EOF'\nprint('gh auth token')\nEOF";
+        assert!(blocked(py).is_none());
+        assert!(
+            blocked("cat <<EOF\nhi\nEOF\ngh auth token").is_some(),
+            "after the heredoc"
+        );
+        assert!(
+            blocked("bash <<'EOF'\ngh auth token\nEOF").is_some(),
+            "a shell runs it"
+        );
+        assert!(blocked("cd x && sh -s <<EOF\ngit credential fill\nEOF").is_some());
     }
 
     #[test]

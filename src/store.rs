@@ -205,6 +205,14 @@ pub struct ExecGrant {
     pub dir: String,
 }
 
+impl ExecGrant {
+    /// Whether this lets `program` run in `dir`: the same program, in the
+    /// approved folder or any folder inside it.
+    pub fn covers(&self, program: &str, dir: &std::path::Path) -> bool {
+        self.program == program && dir.starts_with(&self.dir)
+    }
+}
+
 /// A copy of a credential in git's credential store, for https://<host>
 /// as <username>.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
