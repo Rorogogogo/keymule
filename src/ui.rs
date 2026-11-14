@@ -51,7 +51,8 @@ pub fn run(open: bool, port: u16) -> Result<()> {
 }
 
 /// Start the server on a background thread; returns the page's address
-/// (with its token).
+/// (with its token). Used by the macOS menu-bar app.
+#[cfg(target_os = "macos")]
 pub fn start() -> Result<String> {
     let (listener, ctx) = bind(0)?;
     let url = ctx.url();
