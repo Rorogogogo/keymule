@@ -806,13 +806,13 @@ fn mask_header(v: &str) -> String {
     }
 }
 
-fn backup_path(path: &Path) -> PathBuf {
+pub(crate) fn backup_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".keymule-bak");
     path.with_file_name(name)
 }
 
-fn write_atomic(path: &Path, text: &str) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<()> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".keymule-tmp");
     let tmp = path.with_file_name(name);

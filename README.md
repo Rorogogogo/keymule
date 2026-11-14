@@ -129,10 +129,10 @@ you approve the URL once, the first time it connects.
 
 ```sh
 cargo install --path .        # crates.io release coming
-keymule init                 # registers the MCP server, paste hook and CLAUDE.md note
+keymule init                 # sets up every agent it finds: MCP server, paste hook, instructions
 ```
 
-Restart Claude Code, then just ask:
+Restart your agent (Claude Code, Codex, Cursor, Claude Desktop or Antigravity), then just ask:
 
 > *connect my bamboo, it's at https://bamboo.yourcompany.com*
 
@@ -142,8 +142,8 @@ and the agent only gets back "saved, verified as you". Then: *"check my bamboo p
 
 Prefer the terminal? `keymule add bamboo` does the same with a hidden prompt.
 
-`keymule init --dry-run` shows what it would change first. Your `~/.claude/settings.json` is backed
-up to `settings.json.keymule-bak`.
+`keymule init --dry-run` shows what it would change first. Every config file it edits is backed
+up next to itself as `<name>.keymule-bak`.
 
 ---
 
@@ -165,9 +165,9 @@ up to `settings.json.keymule-bak`.
 | `keymule exec <name> [--env VAR] -- <command…>` | Start an MCP server with its secrets (used in configs). New commands need your approval once |
 | `keymule remote <name> <url> [--header "Name: value"]` | Connect to a remote (HTTP) MCP server, adding the headers keymule holds (used in configs). New URLs need your approval once |
 | `keymule ui [--no-open] [--port N]` | Open the local web page (127.0.0.1 only, token in the link it opens) |
-| `keymule init` | Set up Claude Code |
+| `keymule init [--dry-run]` | Set up every agent found (see [Agents](#agents)) |
 | `keymule mcp` | The MCP server (started by your agent) |
-| `keymule hook prompt` | The Claude Code `UserPromptSubmit` hook |
+| `keymule hook prompt [--agent claude\|codex\|cursor]` | The paste-to-save prompt hook |
 
 ### MCP tools
 
@@ -183,10 +183,24 @@ up to `settings.json.keymule-bak`.
 
 The secret never travels through the MCP connection. There is no tool that takes or returns one.
 
-### Other agents
+### Agents
 
-`keymule init` prints config snippets for Codex and Cursor. The MCP server works there; the
-paste-to-save hook is Claude Code only for now.
+`keymule init` sets up each agent it finds on your machine:
+
+| Agent | MCP server | Paste-to-save hook | Instructions |
+|---|---|---|---|
+| Claude Code | `claude mcp add` (user scope) | `~/.claude/settings.json` | `~/.claude/CLAUDE.md` |
+| Codex | `~/.codex/config.toml` | `~/.codex/hooks.json` | `~/.codex/AGENTS.md` |
+| Cursor | `~/.cursor/mcp.json` | `~/.cursor/hooks.json` | printed for Customize → Rules |
+| Claude Desktop | `claude_desktop_config.json` | none (no prompt hook) | none |
+| Antigravity | `~/.gemini/config/mcp_config.json` | none (no prompt hook) | `~/.gemini/GEMINI.md` |
+
+Codex runs a new hook only after you trust it: type `/hooks` in Codex once. Codex `$CODEX_HOME`
+and `AGENTS.override.md` are respected.
+
+Agents differ in what a hook can do. Claude Code and Codex hold the message, ask, and on `y` send
+it on with the secret swapped for its keymule name. Cursor can only stop a message, so on `y`
+keymule saves the secret and hands the message back, ready to send again without it.
 
 ---
 

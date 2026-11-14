@@ -154,7 +154,8 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         port: u16,
     },
-    /// Register keymule with Claude Code (MCP server, paste hook, CLAUDE.md).
+    /// Set keymule up in every agent found: Claude Code, Claude Desktop,
+    /// Codex, Cursor, Antigravity (MCP server, paste hook, instructions).
     Init {
         #[arg(long)]
         dry_run: bool,
@@ -170,8 +171,13 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum HookKind {
-    /// Claude Code UserPromptSubmit: hold a prompt with a secret and ask.
-    Prompt,
+    /// The prompt hook (Claude Code, Codex, Cursor): hold a prompt with a
+    /// secret and ask.
+    Prompt {
+        /// Which agent runs it.
+        #[arg(long, value_enum, default_value_t)]
+        agent: hook::Agent,
+    },
     /// For the Claude Code mod: find secrets in the prompt on stdin (output
     /// is masked).
     Scan,
@@ -290,12 +296,12 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Init { dry_run } => init::run(dry_run),
         Cmd::Mcp => mcp::serve().await,
         Cmd::Hook {
-            kind: HookKind::Prompt,
+            kind: HookKind::Prompt { agent },
         } => {
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
             let mut store = Store::load()?;
-            if let Some(out) = hook::run(&input, &mut store, store::vault().as_ref()) {
+            if let Some(out) = hook::run_as(agent, &input, &mut store, store::vault().as_ref()) {
                 println!("{out}");
             }
             Ok(())

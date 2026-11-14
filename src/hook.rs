@@ -1,5 +1,6 @@
-//! Claude Code `UserPromptSubmit` hook. It runs locally before a prompt is
-//! sent. A hook can't edit a prompt, only let it through or stop it, so when
+//! The prompt hook for Claude Code (`UserPromptSubmit`), Codex
+//! (`UserPromptSubmit`) and Cursor (`beforeSubmitPrompt`). It runs locally
+//! before a prompt is sent. A hook can't edit a prompt, only let it through or stop it, so when
 //! a prompt has a secret keymule holds it back (in the keychain, for a few
 //! minutes) and asks, right in the terminal, what to do. The next prompt is
 //! the answer: `y` saves the secret and sends the held-back message with the
@@ -25,11 +26,22 @@ const PENDING: &str = "pending:prompt";
 /// How long it waits.
 const PENDING_SECS: u64 = 15 * 60;
 
+/// Which agent runs the hook: each reads a different JSON answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Agent {
+    #[default]
+    Claude,
+    Codex,
+    /// Cursor can only let a prompt through or stop it: no added context.
+    Cursor,
+}
+
 #[derive(Deserialize)]
 struct HookInput {
     #[serde(default)]
     prompt: String,
-    #[serde(default)]
+    /// Cursor calls it `conversation_id`.
+    #[serde(default, alias = "conversation_id")]
     session_id: String,
 }
 
@@ -67,12 +79,23 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
+fn run(stdin: &str, store: &mut Store, vault: &dyn Vault) -> Option<String> {
+    run_as(Agent::Claude, stdin, store, vault)
+}
+
 /// Returns the JSON to print on stdout, or None to let the prompt through.
-pub fn run(stdin: &str, store: &mut Store, vault: &dyn Vault) -> Option<String> {
+pub fn run_as(agent: Agent, stdin: &str, store: &mut Store, vault: &dyn Vault) -> Option<String> {
     let input: HookInput = serde_json::from_str(stdin).ok()?;
-    let out = match handle(&input.prompt, &input.session_id, store, vault, now()) {
-        Outcome::Pass => return None,
-        Outcome::Block(reason) => serde_json::json!({
+    let outcome = handle_as(agent, &input.prompt, &input.session_id, store, vault, now());
+    let out = match (agent, outcome) {
+        (Agent::Cursor, Outcome::Pass) => serde_json::json!({ "continue": true }),
+        (_, Outcome::Pass) => return None,
+        (Agent::Cursor, Outcome::Block(reason)) => serde_json::json!({
+            "continue": false,
+            "user_message": reason,
+        }),
+        (Agent::Claude, Outcome::Block(reason)) => serde_json::json!({
             "decision": "block",
             "reason": reason,
             // Claude Code would otherwise repeat the prompt, secret and all.
@@ -81,7 +104,12 @@ pub fn run(stdin: &str, store: &mut Store, vault: &dyn Vault) -> Option<String> 
                 "suppressOriginalPrompt": true,
             },
         }),
-        Outcome::Context { context, notice } => serde_json::json!({
+        (Agent::Codex, Outcome::Block(reason)) => serde_json::json!({
+            "decision": "block",
+            "reason": reason,
+        }),
+        // Cursor never gets here: its answers are blocks (see `answer`).
+        (_, Outcome::Context { context, notice }) => serde_json::json!({
             "systemMessage": notice,
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
@@ -107,7 +135,13 @@ fn parse_reply(prompt: &str) -> Option<Reply> {
     }
 }
 
-pub fn handle(
+#[cfg(test)]
+fn handle(prompt: &str, session: &str, store: &mut Store, vault: &dyn Vault, at: u64) -> Outcome {
+    handle_as(Agent::Claude, prompt, session, store, vault, at)
+}
+
+pub fn handle_as(
+    agent: Agent,
     prompt: &str,
     session: &str,
     store: &mut Store,
@@ -117,7 +151,7 @@ pub fn handle(
     if let Some(reply) = parse_reply(prompt)
         && let Some(p) = take_pending(vault, session, at)
     {
-        return answer(&p.prompt, reply, store, vault);
+        return answer(agent, &p.prompt, reply, store, vault);
     }
     if prompt.contains(IGNORE_MARKER) {
         return Outcome::Pass;
@@ -134,14 +168,13 @@ pub fn handle(
     .unwrap_or_default();
     if let Err(e) = vault.set(PENDING, &held) {
         // Can't hold it for an answer: keep the old behaviour and save now.
-        return match answer(prompt, Reply::Save(None), store, vault) {
-            Outcome::Context { notice, .. } => Outcome::Block(format!(
-                "keymule couldn't hold your message ({e:#}), so it saved the secret and stopped the message.\n{notice}\nSend your message again without the secret."
-            )),
-            other => other,
-        };
+        let (_, notes) = save_all(prompt, None, store, vault);
+        return Outcome::Block(format!(
+            "keymule couldn't hold your message ({e:#}), so it saved the secret and stopped the message.\nkeymule saved {}.\nSend your message again without the secret.",
+            notes.join(", ")
+        ));
     }
-    Outcome::Block(question(prompt, &found, store, vault))
+    Outcome::Block(question(agent, prompt, &found, store, vault))
 }
 
 fn take_pending(vault: &dyn Vault, session: &str, at: u64) -> Option<Pending> {
@@ -158,7 +191,16 @@ fn describe(f: &detect::Found) -> String {
     )
 }
 
-fn question(prompt: &str, found: &[detect::Found], store: &Store, vault: &dyn Vault) -> String {
+fn question(
+    agent: Agent,
+    prompt: &str,
+    found: &[detect::Found],
+    store: &Store,
+    vault: &dyn Vault,
+) -> String {
+    // Cursor can't send a changed message, so `y` there saves and hands
+    // back the message to send again.
+    let resend = agent == Agent::Cursor;
     let hint = context_hint(prompt, found);
     let what = if found.len() == 1 {
         format!("it has a {}", describe(&found[0]))
@@ -172,22 +214,38 @@ fn question(prompt: &str, found: &[detect::Found], store: &Store, vault: &dyn Va
         match known_as(f, store, vault) {
             Some(n) => {
                 lines.push(format!("It's already in keymule as `{n}`."));
-                lines.push(format!(
-                    "  y           send your message with `{n}` in its place"
-                ));
+                lines.push(if resend {
+                    format!("  y           get your message back with `{n}` in its place")
+                } else {
+                    format!("  y           send your message with `{n}` in its place")
+                });
             }
             None => {
                 let name = suggested_name(f, store, hint.as_deref());
-                lines.push(format!(
-                    "  y           save it as `{name}` and send your message without it"
-                ));
+                lines.push(if resend {
+                    format!(
+                        "  y           save it as `{name}` and get your message back without it"
+                    )
+                } else {
+                    format!("  y           save it as `{name}` and send your message without it")
+                });
                 lines.push("  y <name>    save it under another name".to_string());
             }
         }
     } else {
-        lines.push("  y           save them and send your message without them".into());
+        lines.push(if resend {
+            "  y           save them and get your message back without them".into()
+        } else {
+            "  y           save them and send your message without them".into()
+        });
     }
-    lines.push("  n           send your message as it was".into());
+    if resend {
+        lines.push(format!(
+            "To send it as it was, add {IGNORE_MARKER} to it and send it again."
+        ));
+    } else {
+        lines.push("  n           send your message as it was".into());
+    }
     lines.push(format!(
         "(It waits {} minutes. Anything else you type is sent as usual.)",
         PENDING_SECS / 60
@@ -196,8 +254,19 @@ fn question(prompt: &str, found: &[detect::Found], store: &Store, vault: &dyn Va
 }
 
 /// Act on the answer to a held-back prompt.
-fn answer(prompt: &str, reply: Reply, store: &mut Store, vault: &dyn Vault) -> Outcome {
+fn answer(
+    agent: Agent,
+    prompt: &str,
+    reply: Reply,
+    store: &mut Store,
+    vault: &dyn Vault,
+) -> Outcome {
     let typed = match reply {
+        Reply::Send if agent == Agent::Cursor => {
+            return Outcome::Block(format!(
+                "Cursor can't send a held-back message, so add {IGNORE_MARKER} to it and send it again."
+            ));
+        }
         Reply::Send => {
             return Outcome::Context {
                 context: format!(
@@ -210,6 +279,12 @@ fn answer(prompt: &str, reply: Reply, store: &mut Store, vault: &dyn Vault) -> O
         Reply::Save(t) => t,
     };
     let (message, notes) = save_all(prompt, typed.as_deref(), store, vault);
+    if agent == Agent::Cursor {
+        return Outcome::Block(format!(
+            "keymule saved {}. Cursor can't send your message for you, so send this instead:\n\n{message}",
+            notes.join(", ")
+        ));
+    }
     Outcome::Context {
         context: format!(
             "The user's previous message was held back by keymule because it contained a secret. \
@@ -825,5 +900,66 @@ mod tests {
                 .unwrap()
                 .contains("`github`")
         );
+    }
+
+    #[test]
+    fn codex_gets_a_plain_block_then_the_context() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        let held = format!(r#"{{"prompt":"{GH}","session_id":"c1","turn_id":"t"}}"#);
+        let j: serde_json::Value =
+            serde_json::from_str(&run_as(Agent::Codex, &held, &mut s, &v).unwrap()).unwrap();
+        assert_eq!(j["decision"], "block");
+        assert!(j.get("hookSpecificOutput").is_none(), "{j}");
+        assert!(!j.to_string().contains(GH));
+        let ok = run_as(
+            Agent::Codex,
+            r#"{"prompt":"y","session_id":"c1"}"#,
+            &mut s,
+            &v,
+        )
+        .unwrap();
+        let j: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        assert_eq!(j["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
+        assert!(
+            j["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("`github`")
+        );
+        assert_eq!(s.creds.len(), 1);
+    }
+
+    #[test]
+    fn cursor_saves_and_hands_back_the_message_to_send() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        let cursor = |prompt: &str, s: &mut Store| -> serde_json::Value {
+            let input = serde_json::json!({ "prompt": prompt, "conversation_id": "k1" });
+            serde_json::from_str(&run_as(Agent::Cursor, &input.to_string(), s, &v).unwrap())
+                .unwrap()
+        };
+        assert_eq!(cursor("check my actions runs", &mut s)["continue"], true);
+        let j = cursor(&format!("use {GH} for the acme repo"), &mut s);
+        assert_eq!(j["continue"], false);
+        let q = j["user_message"].as_str().unwrap();
+        assert!(
+            q.contains("get your message back") && q.contains(IGNORE_MARKER),
+            "{q}"
+        );
+        assert!(!q.contains(GH));
+        let j = cursor("y", &mut s);
+        assert_eq!(j["continue"], false);
+        let back = j["user_message"].as_str().unwrap();
+        assert!(
+            back.contains("send this instead") && back.contains("[saved in keymule as `github"),
+            "{back}"
+        );
+        assert!(!back.contains(GH));
+        assert_eq!(s.creds.len(), 1);
+        // `n` can't send it in Cursor: it says how.
+        cursor(GH, &mut s);
+        let j = cursor("n", &mut s);
+        assert!(j["user_message"].as_str().unwrap().contains(IGNORE_MARKER));
     }
 }

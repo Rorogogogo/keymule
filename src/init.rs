@@ -1,5 +1,7 @@
-//! `keymule init`: register the MCP server, install the paste hook, and
-//! tell the agent (via CLAUDE.md) to use keymule instead of asking for tokens.
+//! `keymule init`: in every agent it finds (Claude Code, Claude Desktop,
+//! Codex, Cursor, Antigravity) register the MCP server, install the paste
+//! hook where the agent has one, and tell the agent to use keymule instead
+//! of asking for tokens (CLAUDE.md, AGENTS.md, GEMINI.md).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,6 +27,35 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// The other agents `init` sets up, when they're on this machine.
+#[derive(Default)]
+pub struct Found {
+    pub claude_desktop: bool,
+    pub codex: bool,
+    pub cursor: bool,
+    pub antigravity: bool,
+}
+
+fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
+}
+
+fn codex_home(home: &Path) -> PathBuf {
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".codex"))
+}
+
+pub fn detect(home: &Path) -> Found {
+    Found {
+        claude_desktop: home.join("Library/Application Support/Claude").is_dir(),
+        codex: codex_home(home).is_dir() || on_path("codex"),
+        cursor: home.join(".cursor").is_dir() || on_path("cursor"),
+        antigravity: home.join(".gemini/antigravity-cli").is_dir() || on_path("agy"),
+    }
+}
+
 pub fn run(dry_run: bool) -> Result<()> {
     let exe = std::env::current_exe()?.canonicalize()?;
     let exe_s = exe.to_string_lossy().to_string();
@@ -37,6 +68,7 @@ pub fn run(dry_run: bool) -> Result<()> {
         )
     };
 
+    println!("Claude Code");
     // 1. MCP server
     let has_claude = Command::new("claude").arg("--version").output().is_ok();
     if has_claude {
@@ -45,7 +77,7 @@ pub fn run(dry_run: bool) -> Result<()> {
             .output()
             .is_ok_and(|o| o.status.success());
         if exists {
-            println!("· MCP server `keymule` already registered in Claude Code");
+            println!("· MCP server `keymule` already registered");
         } else {
             if !dry_run {
                 let status = Command::new("claude")
@@ -95,59 +127,260 @@ pub fn run(dry_run: bool) -> Result<()> {
         println!("· {} already mentions keymule", md.display());
     }
 
-    println!(
-        "\nOther agents (manual for now):\n  Codex  ~/.codex/config.toml\n    [mcp_servers.keymule]\n    command = \"{exe_s}\"\n    args = [\"mcp\"]\n  Cursor ~/.cursor/mcp.json\n    \"keymule\": {{ \"command\": \"{exe_s}\", \"args\": [\"mcp\"] }}"
-    );
+    for line in setup_others(&home, &exe_s, &detect(&home), dry_run)? {
+        println!("{line}");
+    }
     if !dry_run {
-        println!("\nRestart Claude Code, then try: keymule add bamboo");
+        println!("\nRestart your agents so they pick up keymule, then try: keymule add bamboo");
     }
     Ok(())
 }
 
-/// Adds the hook unless an keymule hook is already there. Returns whether it changed anything.
-pub fn install_hook(path: &Path, command: &str, dry_run: bool) -> Result<bool> {
-    let mut root: Value = match std::fs::read_to_string(path) {
-        Ok(text) if !text.trim().is_empty() => {
-            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
+/// Set keymule up in each agent in `found`. Returns the lines to print.
+pub fn setup_others(home: &Path, exe: &str, found: &Found, dry_run: bool) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mark = |changed: bool, done: String| {
+        if !changed {
+            format!("· {done} (already there)")
+        } else if dry_run {
+            format!("would {done}")
+        } else {
+            format!("✓ {done}")
         }
-        Ok(_) => json!({}),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
-        Err(e) => return Err(e.into()),
     };
+    let short = |p: &Path| match p.strip_prefix(home) {
+        Ok(rel) => format!("~/{}", rel.display()),
+        Err(_) => p.display().to_string(),
+    };
+    let hook = |agent: &str| format!("{} hook prompt --agent {agent}", shell_quote(exe));
+
+    if found.claude_desktop {
+        out.push("\nClaude Desktop".into());
+        let p = home.join("Library/Application Support/Claude/claude_desktop_config.json");
+        let c = install_mcp_json(&p, exe, dry_run)?;
+        out.push(mark(
+            c,
+            format!("add MCP server `keymule` to {}", short(&p)),
+        ));
+        out.push(
+            "· Claude Desktop has no prompt hook, so a pasted secret isn't caught there".into(),
+        );
+    }
+
+    if found.codex {
+        out.push("\nCodex".into());
+        let dir = codex_home(home);
+        let p = dir.join("config.toml");
+        let c = install_mcp_toml(&p, exe, dry_run)?;
+        out.push(mark(
+            c,
+            format!("add MCP server `keymule` to {}", short(&p)),
+        ));
+        let p = dir.join("hooks.json");
+        let entry =
+            json!({ "hooks": [{ "type": "command", "command": hook("codex"), "timeout": 10 }] });
+        let hooked = install_hook_entry(&p, "UserPromptSubmit", entry, false, dry_run)?;
+        out.push(mark(
+            hooked,
+            format!("add the paste-to-save hook to {}", short(&p)),
+        ));
+        // Codex reads AGENTS.override.md instead of AGENTS.md when it's there.
+        let over = dir.join("AGENTS.override.md");
+        let p = if over.is_file() {
+            over
+        } else {
+            dir.join("AGENTS.md")
+        };
+        let c = install_md(&p, dry_run)?;
+        out.push(mark(
+            c,
+            format!("add keymule instructions to {}", short(&p)),
+        ));
+        if hooked {
+            out.push("  Codex runs a new hook only once you trust it: type /hooks in Codex and trust keymule's.".into());
+        }
+    }
+
+    if found.cursor {
+        out.push("\nCursor".into());
+        let p = home.join(".cursor/mcp.json");
+        let c = install_mcp_json(&p, exe, dry_run)?;
+        out.push(mark(
+            c,
+            format!("add MCP server `keymule` to {}", short(&p)),
+        ));
+        let p = home.join(".cursor/hooks.json");
+        let entry = json!({ "command": hook("cursor"), "timeout": 10 });
+        let c = install_hook_entry(&p, "beforeSubmitPrompt", entry, true, dry_run)?;
+        out.push(mark(
+            c,
+            format!("add the paste-to-save hook to {}", short(&p)),
+        ));
+        out.push("· Cursor keeps its own rules in Customize → Rules. Paste this there so it uses keymule:".into());
+        out.push(
+            MD_BLOCK
+                .lines()
+                .skip(1)
+                .map(|l| format!("    {l}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+
+    if found.antigravity {
+        out.push("\nAntigravity".into());
+        let p = home.join(".gemini/config/mcp_config.json");
+        let c = install_mcp_json(&p, exe, dry_run)?;
+        out.push(mark(
+            c,
+            format!("add MCP server `keymule` to {}", short(&p)),
+        ));
+        let p = home.join(".gemini/GEMINI.md");
+        let c = install_md(&p, dry_run)?;
+        out.push(mark(
+            c,
+            format!("add keymule instructions to {}", short(&p)),
+        ));
+        out.push("· Antigravity has no prompt hook, so a pasted secret isn't caught there".into());
+    }
+    Ok(out)
+}
+
+fn read_json(path: &Path) -> Result<Value> {
+    match std::fs::read_to_string(path) {
+        Ok(text) if !text.trim().is_empty() => {
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        }
+        Ok(_) => Ok(json!({})),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Write `text` to `path`, keeping a backup of what was there.
+fn write_config(path: &Path, text: &str) -> Result<()> {
+    if path.exists() {
+        // Write through a symlink (dotfile setups) instead of replacing it.
+        let path = &path.canonicalize()?;
+        std::fs::copy(path, crate::adopt::backup_path(path))?;
+        crate::adopt::write_atomic(path, text)
+    } else {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, text)?;
+        Ok(())
+    }
+}
+
+/// `"mcpServers": { "keymule": { "command": exe, "args": ["mcp"] } }`, the
+/// shape Claude Desktop, Cursor and Antigravity share. An entry already
+/// called `keymule` is left alone.
+pub fn install_mcp_json(path: &Path, exe: &str, dry_run: bool) -> Result<bool> {
+    let mut root = read_json(path)?;
     let obj = root
         .as_object_mut()
         .ok_or_else(|| anyhow!("{} is not a JSON object", path.display()))?;
-    let hooks = obj.entry("hooks").or_insert_with(|| json!({}));
-    let list = hooks
+    let servers = obj
+        .entry("mcpServers")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("`mcpServers` in {} is not an object", path.display()))?;
+    if servers.contains_key("keymule") {
+        return Ok(false);
+    }
+    servers.insert("keymule".into(), json!({ "command": exe, "args": ["mcp"] }));
+    if !dry_run {
+        write_config(path, &(serde_json::to_string_pretty(&root)? + "\n"))?;
+    }
+    Ok(true)
+}
+
+/// `[mcp_servers.keymule]` in Codex's config.toml, the rest of the file as it was.
+pub fn install_mcp_toml(path: &Path, exe: &str, dry_run: bool) -> Result<bool> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    if doc
+        .get("mcp_servers")
+        .and_then(|t| t.get("keymule"))
+        .is_some()
+    {
+        return Ok(false);
+    }
+    if doc.get("mcp_servers").is_none() {
+        let mut t = toml_edit::Table::new();
+        t.set_implicit(true);
+        doc.insert("mcp_servers", toml_edit::Item::Table(t));
+    }
+    let servers = doc["mcp_servers"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("`mcp_servers` in {} is not a table", path.display()))?;
+    let mut t = toml_edit::Table::new();
+    t.insert("command", toml_edit::value(exe));
+    let mut args = toml_edit::Array::new();
+    args.push("mcp");
+    t.insert("args", toml_edit::value(args));
+    servers.insert("keymule", toml_edit::Item::Table(t));
+    if !dry_run {
+        write_config(path, &doc.to_string())?;
+    }
+    Ok(true)
+}
+
+fn is_keymule_hook(h: &Value) -> bool {
+    h["command"]
+        .as_str()
+        .is_some_and(|c| c.contains("keymule") && c.contains("hook prompt"))
+}
+
+/// Add `entry` under `hooks.<event>` unless a keymule prompt hook is there.
+/// Claude Code and Codex nest commands in `{ "hooks": [...] }` groups;
+/// Cursor lists them directly and wants `"version": 1` (`cursor`).
+pub fn install_hook_entry(
+    path: &Path,
+    event: &str,
+    entry: Value,
+    cursor: bool,
+    dry_run: bool,
+) -> Result<bool> {
+    let mut root = read_json(path)?;
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("{} is not a JSON object", path.display()))?;
+    if cursor {
+        obj.entry("version").or_insert(json!(1));
+    }
+    let arr = obj
+        .entry("hooks")
+        .or_insert_with(|| json!({}))
         .as_object_mut()
         .ok_or_else(|| anyhow!("`hooks` in {} is not an object", path.display()))?
-        .entry("UserPromptSubmit")
-        .or_insert_with(|| json!([]));
-    let arr = list
+        .entry(event)
+        .or_insert_with(|| json!([]))
         .as_array_mut()
-        .ok_or_else(|| anyhow!("`hooks.UserPromptSubmit` is not an array"))?;
-    let already = arr.iter().any(|group| {
-        group["hooks"].as_array().is_some_and(|hs| {
-            hs.iter().any(|h| {
-                h["command"]
-                    .as_str()
-                    .is_some_and(|c| c.contains("keymule") && c.contains("hook prompt"))
-            })
-        })
+        .ok_or_else(|| anyhow!("`hooks.{event}` in {} is not a list", path.display()))?;
+    let already = arr.iter().any(|item| {
+        is_keymule_hook(item)
+            || item["hooks"]
+                .as_array()
+                .is_some_and(|hs| hs.iter().any(is_keymule_hook))
     });
     if already {
         return Ok(false);
     }
-    arr.push(json!({ "hooks": [{ "type": "command", "command": command, "timeout": 10 }] }));
+    arr.push(entry);
     if !dry_run {
-        if path.exists() {
-            std::fs::copy(path, path.with_extension("json.keymule-bak"))?;
-        } else if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, serde_json::to_string_pretty(&root)? + "\n")?;
+        write_config(path, &(serde_json::to_string_pretty(&root)? + "\n"))?;
     }
     Ok(true)
+}
+
+/// Claude Code's paste hook in settings.json. Returns whether it changed anything.
+pub fn install_hook(path: &Path, command: &str, dry_run: bool) -> Result<bool> {
+    let entry = json!({ "hooks": [{ "type": "command", "command": command, "timeout": 10 }] });
+    install_hook_entry(path, "UserPromptSubmit", entry, false, dry_run)
 }
 
 pub fn install_md(path: &Path, dry_run: bool) -> Result<bool> {
@@ -235,5 +468,126 @@ mod tests {
     #[test]
     fn quotes_paths_with_spaces() {
         assert_eq!(shell_quote("/a b/keymule"), "'/a b/keymule'");
+    }
+
+    #[test]
+    fn sets_up_every_other_agent_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(
+            home.join(".codex/config.toml"),
+            "# mine\nmodel = \"x\"\n\n[mcp_servers.acme]\ncommand = \"npx\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        std::fs::write(
+            home.join(".cursor/hooks.json"),
+            r#"{"version":1,"hooks":{"afterFileEdit":[{"command":"./fmt.sh"}]}}"#,
+        )
+        .unwrap();
+        let all = Found {
+            claude_desktop: true,
+            codex: true,
+            cursor: true,
+            antigravity: true,
+        };
+        let exe = "/opt/km/keymule";
+        let lines = setup_others(home, exe, &all, false).unwrap().join("\n");
+        assert!(lines.contains("type /hooks"), "{lines}");
+
+        let codex = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+        assert!(codex.starts_with("# mine\nmodel = \"x\"\n"), "{codex}");
+        assert!(codex.contains("[mcp_servers.acme]"), "{codex}");
+        let t: toml::Table = codex.parse().unwrap();
+        assert_eq!(t["mcp_servers"]["keymule"]["command"].as_str(), Some(exe));
+        assert_eq!(t["mcp_servers"]["keymule"]["args"][0].as_str(), Some("mcp"));
+        let ch: Value = read_json(&home.join(".codex/hooks.json")).unwrap();
+        assert_eq!(
+            ch["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+            "'/opt/km/keymule' hook prompt --agent codex"
+        );
+        assert!(
+            std::fs::read_to_string(home.join(".codex/AGENTS.md"))
+                .unwrap()
+                .contains(MD_START)
+        );
+
+        let cm = read_json(&home.join(".cursor/mcp.json")).unwrap();
+        assert_eq!(cm["mcpServers"]["keymule"]["args"][0], "mcp");
+        let chk = read_json(&home.join(".cursor/hooks.json")).unwrap();
+        assert_eq!(chk["version"], 1);
+        assert_eq!(chk["hooks"]["afterFileEdit"][0]["command"], "./fmt.sh");
+        assert_eq!(
+            chk["hooks"]["beforeSubmitPrompt"][0]["command"],
+            "'/opt/km/keymule' hook prompt --agent cursor"
+        );
+        assert!(home.join(".cursor/hooks.json.keymule-bak").exists());
+
+        let desk =
+            read_json(&home.join("Library/Application Support/Claude/claude_desktop_config.json"))
+                .unwrap();
+        assert_eq!(desk["mcpServers"]["keymule"]["command"], exe);
+        let ag = read_json(&home.join(".gemini/config/mcp_config.json")).unwrap();
+        assert_eq!(ag["mcpServers"]["keymule"]["command"], exe);
+        assert!(
+            std::fs::read_to_string(home.join(".gemini/GEMINI.md"))
+                .unwrap()
+                .contains(MD_START)
+        );
+
+        // Again: nothing changes.
+        let again = setup_others(home, exe, &all, false).unwrap();
+        assert!(
+            again.iter().all(|l| !l.starts_with('✓')),
+            "{}",
+            again.join("\n")
+        );
+        assert!(!again.join("\n").contains("type /hooks"));
+    }
+
+    #[test]
+    fn codex_override_file_wins_and_dry_run_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex/AGENTS.override.md"), "# team\n").unwrap();
+        let codex = Found {
+            codex: true,
+            ..Found::default()
+        };
+        let lines = setup_others(home, "/k", &codex, true).unwrap();
+        assert!(lines.iter().any(|l| l.starts_with("would")));
+        assert!(!home.join(".codex/config.toml").exists());
+        assert!(!home.join(".codex/hooks.json").exists());
+        setup_others(home, "/k", &codex, false).unwrap();
+        assert!(!home.join(".codex/AGENTS.md").exists());
+        assert!(
+            std::fs::read_to_string(home.join(".codex/AGENTS.override.md"))
+                .unwrap()
+                .contains(MD_START)
+        );
+    }
+
+    #[test]
+    fn keeps_an_existing_keymule_entry_and_writes_through_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("dotfiles-mcp.json");
+        std::fs::write(&real, r#"{"mcpServers":{"other":{"command":"x"}}}"#).unwrap();
+        let link = dir.path().join("mcp.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(install_mcp_json(&link, "/k", false).unwrap());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            std::fs::read_to_string(&real)
+                .unwrap()
+                .contains("\"keymule\"")
+        );
+        assert!(!install_mcp_json(&link, "/other/keymule", false).unwrap());
     }
 }
