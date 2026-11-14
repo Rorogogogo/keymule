@@ -32,6 +32,35 @@ struct Ctx {
 }
 
 pub fn run(open: bool, port: u16) -> Result<()> {
+    // The menu-bar app already serves the page: show its window instead.
+    #[cfg(target_os = "macos")]
+    if open && port == 0 && crate::menubar::open_running() {
+        println!("Opened keymule's window (from the menu bar app).");
+        return Ok(());
+    }
+    let (listener, ctx) = bind(port)?;
+    let url = ctx.url();
+    println!(
+        "keymule ui is running at {url}\nOnly this machine can reach it. Press Ctrl-C to stop."
+    );
+    if open {
+        let _ = std::process::Command::new("open").arg(&url).status();
+    }
+    serve(listener, ctx);
+    Ok(())
+}
+
+/// Start the server on a background thread; returns the page's address
+/// (with its token). Used by the macOS menu-bar app.
+#[cfg(target_os = "macos")]
+pub fn start() -> Result<String> {
+    let (listener, ctx) = bind(0)?;
+    let url = ctx.url();
+    std::thread::spawn(move || serve(listener, ctx));
+    Ok(url)
+}
+
+fn bind(port: u16) -> Result<(TcpListener, Arc<Ctx>)> {
     let listener = TcpListener::bind(("127.0.0.1", port))
         .or_else(|_| TcpListener::bind(("127.0.0.1", 0)))
         .context("can't listen on 127.0.0.1")?;
@@ -41,13 +70,16 @@ pub fn run(open: bool, port: u16) -> Result<()> {
         token: random_token()?,
         exe: std::env::current_exe()?,
     });
-    let url = format!("http://127.0.0.1:{port}/#t={}", ctx.token);
-    println!(
-        "keymule ui is running at {url}\nOnly this machine can reach it. Press Ctrl-C to stop."
-    );
-    if open {
-        let _ = std::process::Command::new("open").arg(&url).status();
+    Ok((listener, ctx))
+}
+
+impl Ctx {
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/#t={}", self.port, self.token)
     }
+}
+
+fn serve(listener: TcpListener, ctx: Arc<Ctx>) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let ctx = ctx.clone();
@@ -55,7 +87,6 @@ pub fn run(open: bool, port: u16) -> Result<()> {
             let _ = handle(&ctx, stream);
         });
     }
-    Ok(())
 }
 
 fn random_token() -> Result<String> {
