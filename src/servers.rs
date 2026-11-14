@@ -150,7 +150,7 @@ fn approve(name: &str, binding: &Binding, argv: &[String]) -> Result<()> {
     } else {
         format!(" ({})", vars.join(", "))
     };
-    let allowed = crate::dialog::confirm(&format!(
+    let allowed = crate::trust::confirm(&format!(
         "An MCP server wants to start with your keymule secret \"{name}\"{what}.\n\n\
          Command:\n\n        {}\n\n\
          Only allow this if you set up this server.",
@@ -169,7 +169,7 @@ fn approve(name: &str, binding: &Binding, argv: &[String]) -> Result<()> {
 /// Ask the user whether `url` may receive `name`'s headers.
 pub fn approve_url(name: &str, binding: &Binding, url: &str) -> Result<()> {
     let headers: Vec<&str> = binding.headers.keys().map(String::as_str).collect();
-    let allowed = crate::dialog::confirm(&format!(
+    let allowed = crate::trust::confirm(&format!(
         "A remote MCP server wants your keymule secret \"{name}\" ({} header).\n\n\
          It would be sent to:\n\n        {url}\n\n\
          Only allow this if you set up this server.",

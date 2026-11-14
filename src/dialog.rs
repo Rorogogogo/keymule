@@ -118,10 +118,106 @@ pub fn confirm(message: &str) -> Result<bool> {
     platform_confirm(message)
 }
 
+/// The allow-all dialog: Don't Allow / Allow for Today / Allow Until I Turn
+/// It Off. Test answers: "today", "allow" (until off), anything else is no.
+pub fn allow_all(message: &str) -> Result<Option<crate::trust::Span>> {
+    use crate::trust::Span;
+    let pick = match test_answer(message) {
+        Some(a) => a,
+        None => platform_allow_all(message)?,
+    };
+    Ok(match pick.as_str() {
+        "today" | "Allow for Today" => Some(Span::Today),
+        "allow" | "Allow Until I Turn It Off" => Some(Span::UntilOff),
+        _ => None,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn platform_allow_all(message: &str) -> Result<String> {
+    let script = [
+        "on run argv".to_string(),
+        format!(
+            "set r to display dialog (item 1 of argv) with title \"keymule\" \
+             buttons {{\"Don't Allow\", \"Allow for Today\", \"Allow Until I Turn It Off\"}} \
+             default button \"Don't Allow\" cancel button \"Don't Allow\" with icon caution \
+             giving up after {TIMEOUT_SECS}"
+        ),
+        "if gave up of r then error \"keymule-timeout\" number 2".to_string(),
+        "return button returned of r".to_string(),
+        "end run".to_string(),
+    ];
+    Ok(match osascript(&script, message)? {
+        Answer::Text(t) => t,
+        _ => String::new(),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_allow_all(_message: &str) -> Result<String> {
+    anyhow::bail!("the allow-all dialog is macOS-only for now")
+}
+
+/// What to do with a message that has a secret in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteChoice {
+    Save,
+    SendAsIs,
+    DontSend,
+}
+
+/// Ask what to do with a pasted secret: Don't Send / Send As Is / Save in
+/// keymule (the default). None if no dialog could be shown or it timed
+/// out. Test answers: "save" or "allow", "send", anything else is don't.
+pub fn paste_choice(message: &str) -> Option<PasteChoice> {
+    let pick = match test_answer(message) {
+        Some(a) => a,
+        None => platform_paste_choice(message).ok()?,
+    };
+    match pick.as_str() {
+        "save" | "allow" | "Save in keymule" => Some(PasteChoice::Save),
+        "send" | "Send As Is" => Some(PasteChoice::SendAsIs),
+        "" => None,
+        _ => Some(PasteChoice::DontSend),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_paste_choice(message: &str) -> Result<String> {
+    let script = [
+        "on run argv".to_string(),
+        format!(
+            "set r to display dialog (item 1 of argv) with title \"keymule\" \
+             buttons {{\"Don't Send\", \"Send As Is\", \"Save in keymule\"}} \
+             default button \"Save in keymule\" cancel button \"Don't Send\" with icon caution \
+             giving up after {TIMEOUT_SECS}"
+        ),
+        "if gave up of r then error \"keymule-timeout\" number 2".to_string(),
+        "return button returned of r".to_string(),
+        "end run".to_string(),
+    ];
+    Ok(match osascript(&script, message)? {
+        Answer::Text(t) => t,
+        Answer::Cancelled => "Don't Send".into(),
+        Answer::TimedOut => String::new(),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_paste_choice(_message: &str) -> Result<String> {
+    anyhow::bail!("no dialog here")
+}
+
 /// Show stored values on screen, after the user agrees to it. Returns false
 /// if they didn't. `copy` is the value the Copy button puts on the clipboard
 /// (cleared again after 30 seconds); without it there is no Copy button.
-pub fn reveal(name: &str, items: &[(String, String)], copy: Option<&str>) -> Result<bool> {
+/// With `ask_first` false (allow all), it shows them straight away.
+pub fn reveal(
+    name: &str,
+    items: &[(String, String)],
+    copy: Option<&str>,
+    ask_first: bool,
+) -> Result<bool> {
     let shown = items
         .iter()
         .map(|(k, v)| format!("{k}\n{v}"))
@@ -131,14 +227,16 @@ pub fn reveal(name: &str, items: &[(String, String)], copy: Option<&str>) -> Res
         "Show the secret for \"{name}\" on screen?\n\nAnyone who can see your screen, or a \
          screen recording, will see it. The window closes after 30 seconds."
     );
-    if let Some(a) = test_answer(&ask) {
-        if a != "allow" {
+    let question = ask;
+    let ask = ask_first;
+    if let Some(a) = test_answer(&question) {
+        if ask && a != "allow" {
             return Ok(false);
         }
         let _ = test_answer(&shown);
         return Ok(true);
     }
-    if !platform_ask_reveal(&ask)? {
+    if ask && !platform_ask_reveal(&question)? {
         return Ok(false);
     }
     platform_show(name, &shown, copy)?;

@@ -152,9 +152,18 @@ fn file_name(p: &Path) -> String {
 /// The program `argv[0]` runs, symlinks resolved, or an error if it's one
 /// that would give the secret back.
 pub fn resolve(program: &str) -> Result<PathBuf> {
+    resolve_in(program, false)
+}
+
+/// [`resolve`]; with `allow_all`, shells and interpreters are let through
+/// too (the user turned allow-all on for this folder).
+pub fn resolve_in(program: &str, allow_all: bool) -> Result<PathBuf> {
     let found = crate::servers::which(program)
         .with_context(|| format!("can't find `{program}` on PATH"))?;
     let real = found.canonicalize().unwrap_or_else(|_| found.clone());
+    if allow_all {
+        return Ok(real);
+    }
     for name in [
         file_name(Path::new(program)),
         file_name(&found),
@@ -227,6 +236,7 @@ fn vars_for(store: &Store, name: &str, given: &[String]) -> Result<Vec<String>> 
 
 /// Everything up to starting the command: checks, the approval, the
 /// command with the secret set. Returns it with the secret, for scrubbing.
+#[cfg(test)]
 pub fn prepare(
     vault: &dyn Vault,
     store: &Store,
@@ -236,19 +246,43 @@ pub fn prepare(
     dir: &Path,
     confirm: &dyn Fn(&str) -> Result<bool>,
 ) -> Result<(Command, String)> {
+    prepare_in(vault, store, name, given_vars, argv, dir, confirm, false)
+}
+
+/// [`prepare`], and with `allow_all` (the folder has allow-all on) a new
+/// program runs without asking and without being remembered, so turning
+/// allow-all off brings the question back.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_in(
+    vault: &dyn Vault,
+    store: &Store,
+    name: &str,
+    given_vars: &[String],
+    argv: &[String],
+    dir: &Path,
+    confirm: &dyn Fn(&str) -> Result<bool>,
+    allow_all: bool,
+) -> Result<(Command, String)> {
     let Some(program) = argv.first() else {
         bail!("usage: keymule exec <name> [--env VAR] -- <command> [args…]");
     };
     let vars = vars_for(store, name, given_vars)?;
-    let path = resolve(program)?;
+    let path = resolve_in(program, allow_all)?;
     let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let mut sealed = Sealed::load(vault, name, store.get(name)?)?;
     let program_s = path.to_string_lossy().into_owned();
-    if !sealed
+    let granted = sealed
         .exec_grants
         .iter()
-        .any(|g| g.covers(&program_s, &dir))
-    {
+        .any(|g| g.covers(&program_s, &dir));
+    if !granted && allow_all {
+        crate::http::audit(
+            name,
+            "AUTO-ALLOW",
+            &format!("{} in {} (allow all)", path.display(), dir.display()),
+            0,
+        );
+    } else if !granted {
         let tool = file_name(&path);
         let allowed = confirm(&format!(
             "Let {tool} use \"{name}\" in {}?\n\n\
@@ -304,9 +338,17 @@ fn pump(mut from: impl Read, mut to: impl Write, secret: &str) {
 pub fn run(vault: &dyn Vault, name: &str, vars: &[String], argv: &[String]) -> Result<()> {
     let store = Store::load()?;
     let dir = std::env::current_dir()?;
-    let (mut cmd, secret) = prepare(vault, &store, name, vars, argv, &dir, &|msg| {
-        crate::dialog::confirm(msg)
-    })?;
+    let all = crate::trust::covering(vault, &dir, crate::trust::now()).is_some();
+    let (mut cmd, secret) = prepare_in(
+        vault,
+        &store,
+        name,
+        vars,
+        argv,
+        &dir,
+        &|msg| crate::dialog::confirm(msg),
+        all,
+    )?;
     crate::http::audit(
         name,
         "EXEC",
@@ -503,6 +545,51 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("didn't allow"));
+    }
+
+    #[test]
+    fn allow_all_runs_a_new_program_without_asking_or_remembering_it() {
+        let (dir, store, vault) = setup();
+        let never = |_: &str| -> Result<bool> { panic!("allow all: no dialog") };
+        prepare_in(
+            &vault,
+            &store,
+            "github-acme",
+            &[],
+            &argv("true"),
+            dir.path(),
+            &never,
+            true,
+        )
+        .unwrap();
+        let sealed =
+            Sealed::load(&vault, "github-acme", store.get("github-acme").unwrap()).unwrap();
+        assert!(sealed.exec_grants.is_empty(), "nothing remembered");
+        prepare_in(
+            &vault,
+            &store,
+            "github-acme",
+            &[],
+            &argv("sh -c true"),
+            dir.path(),
+            &never,
+            true,
+        )
+        .expect("allow all lets shells through too");
+        let err = prepare(
+            &vault,
+            &store,
+            "github-acme",
+            &[],
+            &argv("sh -c true"),
+            dir.path(),
+            &never,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("won't hand a credential"),
+            "without it, still refused"
+        );
     }
 
     #[test]

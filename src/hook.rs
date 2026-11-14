@@ -15,6 +15,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::detect;
+use crate::dialog::PasteChoice;
 use crate::presets::{self, AuthKind};
 use crate::store::{Auth, Credential, Sealed, Store, Vault, validate_name};
 
@@ -85,15 +86,24 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Asks what to do with a pasted secret (a dialog in real runs).
+pub type Ask<'a> = &'a dyn Fn(&str) -> Option<PasteChoice>;
+
 #[cfg(test)]
 fn run(stdin: &str, store: &mut Store, vault: &dyn Vault) -> Option<String> {
-    run_as(Agent::Claude, stdin, store, vault)
+    run_as(Agent::Claude, stdin, store, vault, &|_| None)
 }
 
 /// Returns the JSON to print on stdout, or None to let the prompt through.
-pub fn run_as(agent: Agent, stdin: &str, store: &mut Store, vault: &dyn Vault) -> Option<String> {
+pub fn run_as(
+    agent: Agent,
+    stdin: &str,
+    store: &mut Store,
+    vault: &dyn Vault,
+    ask: Ask,
+) -> Option<String> {
     let input: HookInput = serde_json::from_str(stdin).ok()?;
-    let outcome = handle_as(
+    let outcome = handle_with(
         agent,
         &input.prompt,
         &input.session_id,
@@ -101,6 +111,7 @@ pub fn run_as(agent: Agent, stdin: &str, store: &mut Store, vault: &dyn Vault) -
         store,
         vault,
         now(),
+        ask,
     );
     let out = match (agent, outcome) {
         (Agent::Cursor, Outcome::Pass) => serde_json::json!({ "continue": true }),
@@ -154,6 +165,7 @@ fn handle(prompt: &str, session: &str, store: &mut Store, vault: &dyn Vault, at:
     handle_as(Agent::Claude, prompt, session, None, store, vault, at)
 }
 
+#[cfg(test)]
 pub fn handle_as(
     agent: Agent,
     prompt: &str,
@@ -162,6 +174,22 @@ pub fn handle_as(
     store: &mut Store,
     vault: &dyn Vault,
     at: u64,
+) -> Outcome {
+    handle_with(agent, prompt, session, cwd, store, vault, at, &|_| None)
+}
+
+/// [`handle_as`], asking with `ask` (Codex and Cursor only: Claude Code
+/// asks inline through the mod) and saving straight away under allow-all.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_with(
+    agent: Agent,
+    prompt: &str,
+    session: &str,
+    cwd: Option<&str>,
+    store: &mut Store,
+    vault: &dyn Vault,
+    at: u64,
+    ask: Ask,
 ) -> Outcome {
     if let Some(reply) = parse_reply(prompt)
         && let Some(p) = take_pending(vault, session, at)
@@ -174,6 +202,30 @@ pub fn handle_as(
     let found = detect::scan(prompt);
     if found.is_empty() {
         return Outcome::Pass;
+    }
+    let allow_all = cwd.is_some_and(|d| {
+        crate::trust::skips(vault, std::path::Path::new(d), "save a pasted secret")
+    });
+    let choice = if allow_all {
+        Some(PasteChoice::Save)
+    } else if agent == Agent::Claude {
+        None
+    } else {
+        ask(&choice_question(agent, &found))
+    };
+    match choice {
+        Some(PasteChoice::SendAsIs) => return Outcome::Pass,
+        Some(PasteChoice::DontSend) => {
+            return Outcome::Block(
+                "Not sent. Your message had a secret, so keymule kept it back; nothing reached \
+                 the agent."
+                    .into(),
+            );
+        }
+        Some(PasteChoice::Save) => {
+            return save_now(agent, prompt, session, cwd, store, vault, at, allow_all);
+        }
+        None => {} // no dialog: ask in the conversation instead
     }
     let held = serde_json::to_string(&Pending {
         session: session.to_string(),
@@ -191,6 +243,80 @@ pub fn handle_as(
         ));
     }
     Outcome::Block(question(agent, prompt, cwd, &found, store, vault))
+}
+
+fn agent_name(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Claude => "Claude",
+        Agent::Codex => "Codex",
+        Agent::Cursor => "Cursor",
+    }
+}
+
+/// The dialog's question.
+fn choice_question(agent: Agent, found: &[detect::Found]) -> String {
+    let who = agent_name(agent);
+    let what = if found.len() == 1 {
+        format!("a {}", describe(&found[0]))
+    } else {
+        let list: Vec<String> = found.iter().map(describe).collect();
+        format!("{} secrets: {}", found.len(), list.join(", "))
+    };
+    let then = if agent == Agent::Cursor {
+        "keymule gives your message back with the secret's name in its place, to send"
+    } else {
+        "type y to send your message with the secret's name in its place"
+    };
+    format!(
+        "Your message to {who} has {what}.\n\n\
+         Save in keymule: keymule keeps it and {who} never sees it. Then {then}.\n\
+         Send As Is: {who} gets the secret.\n\
+         Don't Send: nothing is sent."
+    )
+}
+
+/// Save the secrets now. The agent can't take a changed message, so the
+/// original is held back: `y` sends it with the names in place (Cursor:
+/// here's the message to send instead).
+#[allow(clippy::too_many_arguments)]
+fn save_now(
+    agent: Agent,
+    prompt: &str,
+    session: &str,
+    cwd: Option<&str>,
+    store: &mut Store,
+    vault: &dyn Vault,
+    at: u64,
+    allow_all: bool,
+) -> Outcome {
+    let (message, notes) = save_all(prompt, cwd, None, store, vault);
+    let why = if allow_all {
+        " (allow all is on here, so it didn't ask)"
+    } else {
+        ""
+    };
+    if agent == Agent::Cursor {
+        return Outcome::Block(format!(
+            "keymule saved {}{why}. Cursor can't send a changed message, so send this instead:\n\n{message}",
+            notes.join(", ")
+        ));
+    }
+    let held = serde_json::to_string(&Pending {
+        session: session.to_string(),
+        at,
+        prompt: prompt.to_string(),
+        cwd: cwd.map(str::to_string),
+    })
+    .unwrap_or_default();
+    let next = if vault.set(PENDING, &held).is_ok() {
+        "Type y and press Enter to send your message with that name in place of the secret."
+    } else {
+        "Send your message again without the secret."
+    };
+    Outcome::Block(format!(
+        "keymule saved {}{why}; nothing reached the agent. {next}",
+        notes.join(", ")
+    ))
 }
 
 fn take_pending(vault: &dyn Vault, session: &str, at: u64) -> Option<Pending> {
@@ -391,7 +517,17 @@ pub fn scan_json(
             })
         })
         .collect();
-    serde_json::json!({ "found": items, "stripped": stripped, "ignore_marker": IGNORE_MARKER })
+    // Allow all on in this folder: the mod saves without asking.
+    let allowed = !found.is_empty()
+        && cwd.is_some_and(|d| {
+            crate::trust::skips(vault, std::path::Path::new(d), "save a pasted secret")
+        });
+    serde_json::json!({
+        "found": items,
+        "stripped": stripped,
+        "ignore_marker": IGNORE_MARKER,
+        "allowed": allowed,
+    })
 }
 
 /// `keymule hook save`: save the secrets in a prompt and return it with each
@@ -1038,7 +1174,8 @@ mod tests {
         let v = MemVault::default();
         let held = format!(r#"{{"prompt":"{GH}","session_id":"c1","turn_id":"t"}}"#);
         let j: serde_json::Value =
-            serde_json::from_str(&run_as(Agent::Codex, &held, &mut s, &v).unwrap()).unwrap();
+            serde_json::from_str(&run_as(Agent::Codex, &held, &mut s, &v, &|_| None).unwrap())
+                .unwrap();
         assert_eq!(j["decision"], "block");
         assert!(j.get("hookSpecificOutput").is_none(), "{j}");
         assert!(!j.to_string().contains(GH));
@@ -1047,6 +1184,7 @@ mod tests {
             r#"{"prompt":"y","session_id":"c1"}"#,
             &mut s,
             &v,
+            &|_| None,
         )
         .unwrap();
         let j: serde_json::Value = serde_json::from_str(&ok).unwrap();
@@ -1060,14 +1198,111 @@ mod tests {
         assert_eq!(s.creds.len(), 1);
     }
 
+    fn codex(
+        prompt: &str,
+        session: &str,
+        s: &mut Store,
+        v: &MemVault,
+        pick: Option<PasteChoice>,
+    ) -> serde_json::Value {
+        let input = serde_json::json!({ "prompt": prompt, "session_id": session }).to_string();
+        let asked = std::cell::Cell::new(false);
+        let ask = |q: &str| {
+            asked.set(true);
+            assert!(
+                q.contains("Your message to Codex has a") && !q.contains(GH),
+                "{q}"
+            );
+            pick
+        };
+        match run_as(Agent::Codex, &input, s, v, &ask) {
+            Some(out) => serde_json::from_str(&out).unwrap(),
+            None => serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn codex_asks_with_a_choice_instead_of_stopping_with_text() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        // Send As Is: no stop at all.
+        let j = codex(GH, "c1", &mut s, &v, Some(PasteChoice::SendAsIs));
+        assert!(j.is_null(), "{j}");
+        assert!(s.creds.is_empty());
+        // Don't Send.
+        let j = codex(GH, "c1", &mut s, &v, Some(PasteChoice::DontSend));
+        assert!(j["reason"].as_str().unwrap().starts_with("Not sent"), "{j}");
+        assert!(s.creds.is_empty());
+        // Save: saved now, then y sends it with the name in place.
+        let j = codex(
+            &format!("deploy with {GH}"),
+            "c2",
+            &mut s,
+            &v,
+            Some(PasteChoice::Save),
+        );
+        let why = j["reason"].as_str().unwrap();
+        assert!(
+            why.contains("keymule saved") && why.contains("Type y"),
+            "{why}"
+        );
+        assert!(!j.to_string().contains(GH));
+        assert_eq!(s.creds.len(), 1);
+        let j = codex("y", "c2", &mut s, &v, None);
+        let ctx = j["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(
+            ctx.contains("deploy with [saved in keymule as `github`]") && !ctx.contains(GH),
+            "{ctx}"
+        );
+        assert_eq!(s.creds.len(), 1, "not saved twice");
+    }
+
+    #[test]
+    fn no_dialog_falls_back_to_the_text_question() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        let j = codex(GH, "c1", &mut s, &v, None);
+        assert!(
+            j["reason"]
+                .as_str()
+                .unwrap()
+                .contains("held back your message"),
+            "{j}"
+        );
+        assert!(s.creds.is_empty());
+    }
+
+    #[test]
+    fn allow_all_saves_without_asking() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        let dir = tempfile::tempdir().unwrap();
+        crate::trust::grant(&v, dir.path(), None, 1).unwrap();
+        let input = serde_json::json!({
+            "prompt": GH, "session_id": "c1", "cwd": dir.path().to_str().unwrap()
+        })
+        .to_string();
+        let never = |_: &str| -> Option<PasteChoice> { panic!("allow all: no dialog") };
+        let out = run_as(Agent::Codex, &input, &mut s, &v, &never).unwrap();
+        assert!(
+            out.contains("allow all is on here") && !out.contains(GH),
+            "{out}"
+        );
+        assert_eq!(s.creds.len(), 1);
+    }
+
     #[test]
     fn cursor_saves_and_hands_back_the_message_to_send() {
         let (_d, mut s) = store();
         let v = MemVault::default();
         let cursor = |prompt: &str, s: &mut Store| -> serde_json::Value {
             let input = serde_json::json!({ "prompt": prompt, "conversation_id": "k1" });
-            serde_json::from_str(&run_as(Agent::Cursor, &input.to_string(), s, &v).unwrap())
-                .unwrap()
+            serde_json::from_str(
+                &run_as(Agent::Cursor, &input.to_string(), s, &v, &|_| None).unwrap(),
+            )
+            .unwrap()
         };
         assert_eq!(cursor("check my actions runs", &mut s)["continue"], true);
         let j = cursor(&format!("use {GH} for the acme repo"), &mut s);

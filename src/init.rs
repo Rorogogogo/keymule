@@ -17,7 +17,7 @@ const MD_BLOCK: &str = "## Credentials (keymule)
 - When setting up an MCP server that needs a password, API key or database URL, never write it into the MCP config: call `add_mcp_secret` (I type it in a dialog), then run the server as `keymule exec <name> [--env VAR] -- <server command>`. For a remote (HTTP) server whose API key goes in a header, call `add_mcp_secret` with `header`, then run it as a stdio server: `keymule remote <name> <url>`.
 - When a command-line tool needs a stored credential (gh, glab…), run it through keymule: `keymule exec <name> --env GH_TOKEN -- gh pr create …`. I approve each program and folder once; the token is hidden from its output.
 - For git over HTTPS as a stored account, call `install_credential` (name, host, username, and dir: the repo folder, so gh is approved in the same dialog), then point the repo's remote at `https://<username>@<host>/<owner>/<repo>.git`.
-- When a CI pipeline needs a stored secret, copy it into the repo's GitHub Actions secrets with `keymule gh-secret <name> --repo <owner>/<repo> --as <SECRET_NAME>` (I approve it in a dialog). Never move a secret through the clipboard, a file or the chat. If the secret isn't in keymule yet, call `add_credential` first.
+- When a CI pipeline needs a stored secret, copy it into the repo's GitHub Actions secrets with `keymule gh-secret --repo <owner>/<repo> SECRET_NAME=<name> [SECRET2=<name2> …]`: one dialog for all of them, uploaded with my existing gh login (no extra GitHub token needed). Never move a secret through the clipboard, a file or the chat. If the secret isn't in keymule yet, call `add_credential` first.
 - Never try to read secrets from the keychain, `security`, `git credential fill`, `gh auth token`, or keymule's files.";
 
 fn home() -> Result<PathBuf> {
@@ -200,8 +200,7 @@ pub fn setup_others(home: &Path, exe: &str, found: &Found, dry_run: bool) -> Res
             format!("add MCP server `keymule` to {}", short(&p)),
         ));
         let p = dir.join("hooks.json");
-        let entry =
-            json!({ "hooks": [{ "type": "command", "command": hook("codex"), "timeout": 10 }] });
+        let entry = json!({ "hooks": [{ "type": "command", "command": hook("codex"), "timeout": PROMPT_TIMEOUT }] });
         let hooked = install_hook_entry(&p, "UserPromptSubmit", entry, false, dry_run)?;
         out.push(mark(
             hooked,
@@ -241,7 +240,7 @@ pub fn setup_others(home: &Path, exe: &str, found: &Found, dry_run: bool) -> Res
             format!("add MCP server `keymule` to {}", short(&p)),
         ));
         let p = home.join(".cursor/hooks.json");
-        let entry = json!({ "command": hook("cursor"), "timeout": 10 });
+        let entry = json!({ "command": hook("cursor"), "timeout": PROMPT_TIMEOUT });
         let c = install_hook_entry(&p, "beforeSubmitPrompt", entry, true, dry_run)?;
         out.push(mark(
             c,
@@ -385,6 +384,17 @@ fn marker_of(entry: &Value) -> &'static str {
 /// Add `entry` under `hooks.<event>` unless the same keymule hook is there.
 /// Claude Code and Codex nest commands in `{ "hooks": [...] }` groups;
 /// Cursor lists them directly and wants `"version": 1` (`cursor`).
+/// Codex's and Cursor's paste hooks show a dialog (up to 3 minutes), so
+/// they need longer than the 10 seconds a hook that only checks would.
+const PROMPT_TIMEOUT: u64 = 200;
+
+/// The timeout an entry asks for (`timeout`, or its first hook's).
+fn timeout_of(entry: &Value) -> Option<u64> {
+    entry["timeout"]
+        .as_u64()
+        .or_else(|| entry["hooks"][0]["timeout"].as_u64())
+}
+
 pub fn install_hook_entry(
     path: &Path,
     event: &str,
@@ -416,7 +426,27 @@ pub fn install_hook_entry(
                 .is_some_and(|hs| hs.iter().any(|h| is_keymule_hook(h, marker)))
     });
     if already {
-        return Ok(false);
+        // Already there: only bring its timeout up to date.
+        let Some(want) = timeout_of(&entry) else {
+            return Ok(false);
+        };
+        let mut changed = false;
+        for item in arr.iter_mut() {
+            let mut fix = |h: &mut Value| {
+                if is_keymule_hook(h, marker) && h["timeout"].as_u64() != Some(want) {
+                    h["timeout"] = json!(want);
+                    changed = true;
+                }
+            };
+            fix(item);
+            if let Some(hs) = item["hooks"].as_array_mut() {
+                hs.iter_mut().for_each(&mut fix);
+            }
+        }
+        if changed && !dry_run {
+            write_config(path, &(serde_json::to_string_pretty(&root)? + "\n"))?;
+        }
+        return Ok(changed);
     }
     arr.push(entry);
     if !dry_run {
