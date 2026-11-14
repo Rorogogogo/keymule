@@ -23,7 +23,7 @@ pub fn placeholder(n: usize) -> String {
 
 /// Env vars that make an interpreter load extra code. They're dropped so a
 /// caller can't use them to run something that dumps the secrets.
-const STRIP_ENV: &[&str] = &[
+pub const STRIP_ENV: &[&str] = &[
     "NODE_OPTIONS",
     "NODE_PATH",
     "LD_PRELOAD",

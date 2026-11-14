@@ -162,12 +162,15 @@ up next to itself as `<name>.keymule-bak`.
 | `keymule presets` | List service presets |
 | `keymule doctor [--all] [--json] [--dir D]` | Find leaked and plain-text secrets |
 | `keymule adopt [--dry-run] [--yes] [--server NAME]` | Move plain-text MCP server secrets into the keychain |
-| `keymule exec <name> [--env VAR] -- <command…>` | Start an MCP server with its secrets (used in configs). New commands need your approval once |
+| `keymule exec <name> [--env VAR] -- <command…>` | Start an MCP server with its secrets (used in configs), or run a CLI tool with a stored credential in an env var. New commands need your approval once |
+| `keymule install <name> --host H --username U` | Copy a credential into git's credential store, so git uses it for `https://U@H` (asks you first) |
+| `keymule uninstall <name> [--host H] [--username U]` | Remove those copies again (the credential stays in keymule) |
 | `keymule remote <name> <url> [--header "Name: value"]` | Connect to a remote (HTTP) MCP server, adding the headers keymule holds (used in configs). New URLs need your approval once |
 | `keymule ui [--no-open] [--port N]` | Open the local web page (127.0.0.1 only, token in the link it opens) |
 | `keymule init [--dry-run]` | Set up every agent found (see [Agents](#agents)) |
 | `keymule mcp` | The MCP server (started by your agent) |
 | `keymule hook prompt [--agent claude\|codex\|cursor]` | The paste-to-save prompt hook |
+| `keymule hook bash [--agent claude\|codex\|cursor]` | The guard that stops agents reading tokens back out of git, gh or the keychain |
 
 ### MCP tools
 
@@ -178,10 +181,43 @@ up next to itself as `<name>.keymule-bak`.
 | `add_credential` | Opens a secure dialog for the user to type the secret; verifies and stores it |
 | `rotate_credential` | Same dialog, for a new token on an existing credential |
 | `update_credential` | Change URL, username or description; a new host needs the user's approval in a dialog |
+| `install_credential` | Copy a credential into git's credential store for a host and account, after the user approves in a dialog |
 | `add_mcp_secret` | Store a secret an MCP server needs (database URL, API key, header) via the dialog, for `keymule exec` or `keymule remote` |
 | `scan_for_leaks` | Run the doctor and return masked results |
 
 The secret never travels through the MCP connection. There is no tool that takes or returns one.
+
+### CLI tools and git
+
+Some jobs aren't one HTTP call: `gh pr create`, `git push`. keymule covers them without the
+token passing through the chat or your clipboard.
+
+```sh
+# gh, glab and other CLIs: the token goes into the env var the tool reads
+keymule exec github-acme --env GH_TOKEN -- gh pr create --repo acme/shop --fill
+
+# git over HTTPS: copy the token into git's own credential store, once
+keymule install github-acme --host github.com --username acme-bot
+git remote set-url origin https://acme-bot@github.com/acme/shop.git
+```
+
+- **exec** asks you once per program and folder, in a dialog. It refuses shells, interpreters
+  and tools that just print their environment (`sh`, `python`, `env`, `cat`…), including scripts
+  run by one. It scrubs the token from the tool's output, as is, URL-encoded or base64. The tool
+  itself does get the token, so only allow tools you trust.
+- **install** runs `git credential approve` itself, with the token on stdin, so it lands in
+  whatever helper git uses (osxkeychain, Git Credential Manager…). keymule remembers the copy:
+  `rotate` updates it, `rm` and `uninstall` erase it. Repos whose remote URL names another
+  account keep using that one. To keep your usual account the default everywhere else, set
+  `git config --global credential.https://github.com.username <you>` once.
+- Once the token is in git's store, anything you run could ask git for it. keymule's agent hook
+  (`keymule hook bash`) blocks the usual ways to read it back: `git credential fill`, asking a
+  helper directly, `security find-…-password -w`, `gh auth token`, and `~/.git-credentials` or gh's
+  `hosts.yml`. It always blocks them, installed or not. It matches command text, so it's a guard
+  rail, not a wall.
+
+A GitHub credential at `api.github.com` may also be used for `github.com` and
+`uploads.github.com`.
 
 ### Agents
 
@@ -189,9 +225,9 @@ The secret never travels through the MCP connection. There is no tool that takes
 
 | Agent | MCP server | Paste-to-save hook | Instructions |
 |---|---|---|---|
-| Claude Code | `claude mcp add` (user scope) | `~/.claude/settings.json` | `~/.claude/CLAUDE.md` |
-| Codex | `~/.codex/config.toml` | `~/.codex/hooks.json` | `~/.codex/AGENTS.md` |
-| Cursor | `~/.cursor/mcp.json` | `~/.cursor/hooks.json` | printed for Customize → Rules |
+| Claude Code | `claude mcp add` (user scope) | `~/.claude/settings.json` (+ read-back guard) | `~/.claude/CLAUDE.md` |
+| Codex | `~/.codex/config.toml` | `~/.codex/hooks.json` (+ read-back guard) | `~/.codex/AGENTS.md` |
+| Cursor | `~/.cursor/mcp.json` | `~/.cursor/hooks.json` (+ read-back guard) | printed for Customize → Rules |
 | Claude Desktop | `claude_desktop_config.json` | none (no prompt hook) | none |
 | Antigravity | `~/.gemini/config/mcp_config.json` | none (no prompt hook) | `~/.gemini/GEMINI.md` |
 

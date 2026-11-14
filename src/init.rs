@@ -15,7 +15,9 @@ const MD_BLOCK: &str = "## Credentials (keymule)
 - API tokens and passwords are stored in keymule. Use the `keymule` MCP tools (`list_credentials`, then `http_request`) for any service that needs auth, e.g. Bamboo, GitHub Actions, GitLab, Jenkins.
 - Never ask me to paste a token, password or API key into the chat. If a credential is missing, call `add_credential`: it opens a secure dialog where I type the secret. Ask me for the base URL first if the service needs one.
 - When setting up an MCP server that needs a password, API key or database URL, never write it into the MCP config: call `add_mcp_secret` (I type it in a dialog), then run the server as `keymule exec <name> [--env VAR] -- <server command>`. For a remote (HTTP) server whose API key goes in a header, call `add_mcp_secret` with `header`, then run it as a stdio server: `keymule remote <name> <url>`.
-- Never try to read secrets from the keychain, `security`, or keymule's files.";
+- When a command-line tool needs a stored credential (gh, glab…), run it through keymule: `keymule exec <name> --env GH_TOKEN -- gh pr create …`. I approve each program and folder once; the token is hidden from its output.
+- For git over HTTPS as a stored account, call `install_credential` (name, host, username), then point the repo's remote at `https://<username>@<host>/<owner>/<repo>.git`.
+- Never try to read secrets from the keychain, `security`, `git credential fill`, `gh auth token`, or keymule's files.";
 
 fn home() -> Result<PathBuf> {
     std::env::var_os("HOME")
@@ -116,6 +118,25 @@ pub fn run(dry_run: bool) -> Result<()> {
         println!("· paste-to-save hook already installed");
     }
 
+    let guard = json!({
+        "matcher": "Bash|Read",
+        "hooks": [{ "type": "command", "command": format!("{} hook bash", shell_quote(&exe_s)), "timeout": 5 }],
+    });
+    if install_hook_entry(&settings, "PreToolUse", guard, false, dry_run)? {
+        say(
+            &format!(
+                "installed the token read-back guard in {}",
+                settings.display()
+            ),
+            &format!(
+                "add a PreToolUse hook to {}: keymule hook bash",
+                settings.display()
+            ),
+        );
+    } else {
+        println!("· token read-back guard already installed");
+    }
+
     // 3. Agent instructions
     let md = home.join(".claude").join("CLAUDE.md");
     if install_md(&md, dry_run)? {
@@ -153,6 +174,7 @@ pub fn setup_others(home: &Path, exe: &str, found: &Found, dry_run: bool) -> Res
         Err(_) => p.display().to_string(),
     };
     let hook = |agent: &str| format!("{} hook prompt --agent {agent}", shell_quote(exe));
+    let guard = |agent: &str| format!("{} hook bash --agent {agent}", shell_quote(exe));
 
     if found.claude_desktop {
         out.push("\nClaude Desktop".into());
@@ -184,6 +206,14 @@ pub fn setup_others(home: &Path, exe: &str, found: &Found, dry_run: bool) -> Res
             hooked,
             format!("add the paste-to-save hook to {}", short(&p)),
         ));
+        let entry =
+            json!({ "hooks": [{ "type": "command", "command": guard("codex"), "timeout": 5 }] });
+        let guarded = install_hook_entry(&p, "PreToolUse", entry, false, dry_run)?;
+        out.push(mark(
+            guarded,
+            format!("add the token read-back guard to {}", short(&p)),
+        ));
+        let hooked = hooked || guarded;
         // Codex reads AGENTS.override.md instead of AGENTS.md when it's there.
         let over = dir.join("AGENTS.override.md");
         let p = if over.is_file() {
@@ -215,6 +245,12 @@ pub fn setup_others(home: &Path, exe: &str, found: &Found, dry_run: bool) -> Res
         out.push(mark(
             c,
             format!("add the paste-to-save hook to {}", short(&p)),
+        ));
+        let entry = json!({ "command": guard("cursor"), "timeout": 5 });
+        let c = install_hook_entry(&p, "beforeShellExecution", entry, true, dry_run)?;
+        out.push(mark(
+            c,
+            format!("add the token read-back guard to {}", short(&p)),
         ));
         out.push("· Cursor keeps its own rules in Customize → Rules. Paste this there so it uses keymule:".into());
         out.push(
@@ -329,13 +365,23 @@ pub fn install_mcp_toml(path: &Path, exe: &str, dry_run: bool) -> Result<bool> {
     Ok(true)
 }
 
-fn is_keymule_hook(h: &Value) -> bool {
+fn is_keymule_hook(h: &Value, marker: &str) -> bool {
     h["command"]
         .as_str()
-        .is_some_and(|c| c.contains("keymule") && c.contains("hook prompt"))
+        .is_some_and(|c| c.contains("keymule") && c.contains(marker))
 }
 
-/// Add `entry` under `hooks.<event>` unless a keymule prompt hook is there.
+/// The part of a hook command that tells keymule's hooks apart.
+fn marker_of(entry: &Value) -> &'static str {
+    let text = entry.to_string();
+    if text.contains("hook bash") {
+        "hook bash"
+    } else {
+        "hook prompt"
+    }
+}
+
+/// Add `entry` under `hooks.<event>` unless the same keymule hook is there.
 /// Claude Code and Codex nest commands in `{ "hooks": [...] }` groups;
 /// Cursor lists them directly and wants `"version": 1` (`cursor`).
 pub fn install_hook_entry(
@@ -361,11 +407,12 @@ pub fn install_hook_entry(
         .or_insert_with(|| json!([]))
         .as_array_mut()
         .ok_or_else(|| anyhow!("`hooks.{event}` in {} is not a list", path.display()))?;
+    let marker = marker_of(&entry);
     let already = arr.iter().any(|item| {
-        is_keymule_hook(item)
+        is_keymule_hook(item, marker)
             || item["hooks"]
                 .as_array()
-                .is_some_and(|hs| hs.iter().any(is_keymule_hook))
+                .is_some_and(|hs| hs.iter().any(|h| is_keymule_hook(h, marker)))
     });
     if already {
         return Ok(false);
