@@ -611,5 +611,171 @@ check("guard blocks git credential fill",
 check("guard blocks gh auth token (Codex)", (guard("gh auth token", "codex") or {}).get("decision") == "block")
 check("guard lets git push through", guard("git push origin main") is None)
 
+# ---- gh-secret: several secrets, one dialog, a fake GitHub -------------------
+import base64
+GH_TOKEN_MOCK = "ghp_e2eMockToken0123456789abcdefghijkl"
+gh_secrets = {"CWS_REFRESH_TOKEN"}  # already there
+puts = []  # (name, body, authorization)
+
+
+class FakeGitHub(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def reply(self, code, obj=None):
+        body = json.dumps(obj).encode() if obj is not None else b""
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def authed(self):
+        return self.headers.get("Authorization") == f"Bearer {GH_TOKEN_MOCK}"
+
+    def do_GET(self):
+        if not self.authed():
+            return self.reply(401, {"message": "Bad credentials"})
+        path = self.path.split("?")[0]
+        if path == "/user":
+            return self.reply(200, {"login": "octo"})
+        if path == "/repos/octo/ext":
+            return self.reply(200, {"permissions": {"admin": True, "push": True, "pull": True}})
+        if path == "/repos/octo/ext/actions/secrets":
+            return self.reply(200, {"secrets": [{"name": n} for n in sorted(gh_secrets)]})
+        if path == "/repos/octo/ext/actions/secrets/public-key":
+            return self.reply(200, {"key_id": "k1", "key": base64.b64encode(bytes(range(32))).decode()})
+        self.reply(404, {"message": "Not Found"})
+
+    def do_PUT(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        name = self.path.rsplit("/", 1)[1]
+        puts.append((name, body, self.headers.get("Authorization")))
+        existed = name in gh_secrets
+        gh_secrets.add(name)
+        self.reply(204 if existed else 201)
+
+
+srv_g = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeGitHub)
+threading.Thread(target=srv_g.serve_forever, daemon=True).start()
+gport = srv_g.server_address[1]
+with open(os.path.join(home, "credentials.toml"), "a") as f:
+    f.write(f"""
+[credentials.github-mock]
+service = "github"
+url = "http://127.0.0.1:{gport}"
+auth = {{ type = "bearer" }}
+hosts = ["127.0.0.1:{gport}"]
+added_by = "cli"
+""")
+    for n in ("cws-id", "cws-secret", "cws-refresh"):
+        f.write(f"""
+[credentials.{n}]
+service = "generic"
+url = "https://oauth2.googleapis.com"
+auth = {{ type = "bearer" }}
+hosts = ["oauth2.googleapis.com"]
+added_by = "cli"
+""")
+with open(vault) as f:
+    vj = json.load(f)
+CWS = {"cws-id": "1234-abc.apps.googleusercontent.com", "cws-secret": "GOCSPX-e2eClientSecretValue42",
+       "cws-refresh": "1//e2eRefreshTokenValue-0123456789"}
+vj.update({"github-mock": GH_TOKEN_MOCK, **CWS})
+with open(vault, "w") as f:
+    json.dump(vj, f)
+nopath = tempfile.mkdtemp()  # no gh on PATH: only the stored credential can upload
+gargs = ["gh-secret", "--repo", "octo/ext", "--via", "github-mock",
+         "CWS_CLIENT_ID=cws-id", "CWS_CLIENT_SECRET=cws-secret", "CWS_REFRESH_TOKEN=cws-refresh"]
+dlog = os.path.join(home, "xdialog.log")
+before = open(dlog).read().count("---") if os.path.exists(dlog) else 0
+r = kx(*gargs, "--dry-run", answer="allow", PATH=nopath)
+check("gh-secret --dry-run names the account and changes nothing",
+      r.returncode == 0 and "signed in as octo, admin on octo/ext" in r.stdout
+      and "replace CWS_REFRESH_TOKEN" in r.stdout and "create CWS_CLIENT_ID" in r.stdout and not puts,
+      r.stdout + r.stderr)
+r = kx(*gargs, answer="deny", PATH=nopath)
+check("gh-secret: a no copies nothing", r.returncode != 0 and not puts, r.stderr)
+r = kx(*gargs, answer="allow", PATH=nopath)
+dialogs = open(dlog).read().split("---")[before:]
+asked = [d for d in dialogs if "GitHub Actions secrets" in d]
+check("gh-secret copies three secrets after one dialog per run",
+      r.returncode == 0 and len(asked) == 2 and [n for n, _, _ in puts] ==
+      ["CWS_CLIENT_ID", "CWS_CLIENT_SECRET", "CWS_REFRESH_TOKEN"]
+      and "created CWS_CLIENT_ID" in r.stdout and "updated CWS_REFRESH_TOKEN" in r.stdout
+      and "GitHub now lists all of them" in r.stdout, r.stdout + r.stderr + str(len(asked)))
+check("gh-secret's dialog lists each secret and the real account",
+      bool(asked) and "Copy 3 secrets" in asked[-1] and "CWS_CLIENT_SECRET  ←  cws-secret" in asked[-1]
+      and "Uploaded as octo (admin there)" in asked[-1], asked[-1] if asked else "")
+plain = list(CWS.values()) + [GH_TOKEN_MOCK]
+check("gh-secret uploads only ciphertext",
+      all(b["key_id"] == "k1" and len(base64.b64decode(b["encrypted_value"])) == 48 + len(CWS[c])
+          and not any(v in json.dumps(b) for v in plain)
+          for (n, b, _), c in zip(puts, ("cws-id", "cws-secret", "cws-refresh"))), puts)
+log = open(os.path.join(home, "audit.log")).read()
+check("gh-secret logs each copy, without values",
+      log.count("\tGH-SECRET\t") == 3 and "via github-mock" in log and not any(v in log + r.stdout for v in plain))
+r = kx("gh-secret", "--repo", "octo/elsewhere", "X=cws-id", "--via", "github-mock", answer="allow", PATH=nopath)
+check("gh-secret explains a login that can't see the repo",
+      r.returncode != 0 and "github-mock: signed in as octo, can't see octo/elsewhere" in r.stderr
+      and "gh: " in r.stderr, r.stderr)
+
+# ---- allow all: one dialog, then nothing asks in that folder except delete ----
+proj = tempfile.mkdtemp()
+os.mkdir(os.path.join(proj, ".git"))
+inner = os.path.join(proj, "src")
+os.mkdir(inner)
+def kp(*args, answer="deny", cwd=inner, **kw):
+    return subprocess.run([BIN, *args], env=dict(xenv, KEYMULE_TEST_DIALOG=answer, **kw),
+                          capture_output=True, text=True, timeout=30, cwd=cwd)
+r = kp("allow", answer="deny")
+check("allow: a no keeps keymule asking", r.returncode != 0 and "keeps asking" in r.stderr, r.stderr)
+r = kp("allow", answer="allow")
+check("allow: one yes turns it on for the whole repo",
+      r.returncode == 0 and "Allow all is on in" in r.stdout and "until you turn it off" in r.stdout, r.stdout + r.stderr)
+built = os.path.join(proj, "agent-built-tool")  # like the Swift helper: built by the agent, not a script
+os.symlink("/usr/bin/true", built)
+r = kp("exec", "cws-secret", "--env", "X", "--", built, answer="deny")
+check("allow all: an agent-built program runs with no dialog", r.returncode == 0, r.stderr)
+r = kp("gh-secret", "--repo", "octo/ext", "--via", "github-mock", "A_NEW_ONE=cws-id", answer="deny", PATH=nopath)
+check("allow all: gh-secret copies with no dialog", r.returncode == 0 and "created A_NEW_ONE" in r.stdout,
+      r.stdout + r.stderr)
+r = kp("reveal", "cws-id", answer="deny")
+check("allow all: reveal shows it with no question", r.returncode == 0 and "Showed" in r.stdout, r.stdout + r.stderr)
+r = kp("rm", "cws-id", "--dialog", answer="deny")
+check("allow all: deleting still asks", r.returncode != 0 and "nothing was deleted" in r.stderr, r.stderr)
+r = kp("exec", "cws-secret", "--env", "X", "--", "sh", "-c", "true", answer="deny")
+check("allow all: shells run too", r.returncode == 0, r.stderr)
+def guard_in(command, cwd):
+    r = subprocess.run([BIN, "hook", "bash", "--agent", "codex"],
+                       input=json.dumps({"tool_input": {"command": command}, "cwd": cwd}),
+                       env=env, capture_output=True, text=True, timeout=10)
+    return r.stdout.strip()
+check("allow all: the read-back guard lets commands through", guard_in("gh auth token", inner) == "")
+check("allow all: the guard still blocks in other folders", "block" in guard_in("gh auth token", tools))
+def codex_paste(prompt, cwd, answer):
+    r = subprocess.run([BIN, "hook", "prompt", "--agent", "codex"],
+                       input=json.dumps({"prompt": prompt, "session_id": "e2e-x", "cwd": cwd}),
+                       env=dict(xenv, KEYMULE_TEST_DIALOG=answer), capture_output=True, text=True, timeout=10)
+    return r.stdout.strip()
+PASTE = "ghp_e2ePasteTokenAbcdefghijklmnopqrstu9876"
+out = codex_paste(f"use {PASTE}", inner, "deny")
+check("allow all: a pasted secret is saved without a dialog",
+      "allow all is on here" in out and PASTE not in out, out)
+out = codex_paste("use ghp_e2eOtherTokenAbcdefghijklmnopqrst5432", tools, "send")
+check("Codex paste: Send As Is in the dialog lets the message through", out == "", out)
+r = kp("exec", "cws-secret", "--env", "X", "--", built, answer="deny", cwd=tools)
+check("allow all: another folder still asks", r.returncode != 0 and "didn't allow" in r.stderr, r.stderr)
+log = open(os.path.join(home, "audit.log")).read()
+check("allow all: every skipped dialog is in the activity log",
+      "\tALLOW-ALL-ON\t" in log and log.count("\tAUTO-ALLOW\t") >= 3)
+r = kp("allow", "--status")
+check("allow --status says where it's on", "Allow all is on in" in r.stdout, r.stdout)
+r = kp("allow", "--off")
+check("allow --off turns it off without asking", r.returncode == 0 and "keymule asks again" in r.stdout, r.stdout + r.stderr)
+r = kp("exec", "cws-secret", "--env", "X", "--", built, answer="deny")
+check("after --off, the agent-built program asks again (nothing was remembered)",
+      r.returncode != 0 and "didn't allow" in r.stderr, r.stderr)
+
 print(f"\n{'ALL PASSED' if not fails else f'{fails} FAILED'}")
 sys.exit(1 if fails else 0)

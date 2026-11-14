@@ -37,10 +37,14 @@ the secret is hidden from its output, and shells and interpreters are refused. F
 HTTPS, call install_credential (name, host, username, dir = the repo folder; one dialog also \
 approves the service's CLI there) and point the repo's remote at \
 https://<username>@<host>/<owner>/<repo>.git. To put a stored secret into a repo's GitHub \
-Actions secrets (for CI), run `keymule gh-secret <name> --repo <owner>/<repo> --as \
-<SECRET_NAME>`: keymule encrypts it with the repo's key and the user approves it in a dialog; \
-never move a secret through the clipboard, a file or the chat. Never read a token back (git credential fill, \
-gh auth token, security find-*-password -w).";
+Actions secrets (for CI), run `keymule gh-secret --repo <owner>/<repo> SECRET_NAME=<name> \
+[SECRET2=<name2> ...]`: one dialog covers all of them, keymule encrypts each with the repo's \
+key, and it uploads with the account the gh CLI is already signed in as (no GitHub token in \
+keymule needed) or a stored GitHub credential, whichever has admin there; `--dry-run` shows \
+which account first. Never move a secret through the clipboard, a file, a helper program or \
+the chat. Never read a token back (git credential fill, \
+gh auth token, security find-*-password -w). If the user asks for keymule to stop asking in this project, run `keymule allow` \
+(one dialog; deleting still asks; `keymule allow --off` undoes it). Don't turn it on unless they ask.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct InstallArgs {
@@ -145,7 +149,7 @@ async fn ask_secret(message: String) -> anyhow::Result<String> {
 }
 
 async fn ask_confirm(message: String) -> anyhow::Result<bool> {
-    tokio::task::spawn_blocking(move || dialog::confirm(&message)).await?
+    tokio::task::spawn_blocking(move || crate::trust::confirm(&message)).await?
 }
 
 /// Verify before saving. Returns a note for the result message.
@@ -536,7 +540,7 @@ impl Server {
                 how.push(format!("CLI tools: keymule exec {name} --env {var} -- {cli} ..."));
                 if c.service != "github" {
                     how.push(format!(
-                        "GitHub Actions secret: keymule gh-secret {name} --repo <owner>/<repo> --as <SECRET_NAME>"
+                        "GitHub Actions secret: keymule gh-secret --repo <owner>/<repo> <SECRET_NAME>={name} (several in one go: add more SECRET=name)"
                     ));
                 }
                 if c.service == "github" || c.service == "gitlab" {
@@ -684,7 +688,7 @@ impl Server {
                 &args.host,
                 &args.username,
                 cli,
-                &|m| dialog::confirm(m),
+                &|m| crate::trust::confirm(m),
                 &crate::install::RealGit,
             )
         })

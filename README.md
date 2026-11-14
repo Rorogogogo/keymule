@@ -165,7 +165,8 @@ up next to itself as `<name>.keymule-bak`.
 | `keymule exec <name> [--env VAR] -- <command…>` | Start an MCP server with its secrets (used in configs), or run a CLI tool with a stored credential in an env var. New commands need your approval once |
 | `keymule install <name> --host H --username U [--dir D]` | Copy a credential into git's credential store, so git uses it for `https://U@H`; the same dialog lets the service's CLI (gh) use it in the repo folder |
 | `keymule uninstall <name> [--host H] [--username U]` | Remove those copies again (the credential stays in keymule) |
-| `keymule gh-secret <name> --repo O/R --as SECRET [--via GH]` | Copy a credential into a GitHub Actions secret for CI: encrypted with the repo's key and uploaded with your stored GitHub credential, after you allow it in a dialog |
+| `keymule gh-secret --repo O/R SECRET=name… [--via gh\|gh:LOGIN\|CRED] [--dry-run]` | Copy credentials into GitHub Actions secrets for CI, all in one dialog: encrypted with the repo's key, uploaded as the account `gh` is signed in as (or a stored GitHub credential) after keymule checks it has admin on the repo |
+| `keymule allow [--off [--everywhere]] [--status]` | Allow all: one dialog, then keymule stops asking in this repo (any program including shells, gh-secret, new hosts, reveal, the read-back guard, pasted secrets saved without asking). Deleting still asks; every skipped dialog is logged |
 | `keymule remote <name> <url> [--header "Name: value"]` | Connect to a remote (HTTP) MCP server, adding the headers keymule holds (used in configs). New URLs need your approval once |
 | `keymule ui [--no-open] [--port N]` | Open the local web page (127.0.0.1 only, token in the link it opens) |
 | `keymule init [--dry-run]` | Set up every agent found (see [Agents](#agents)) |
@@ -202,9 +203,18 @@ keymule exec github-acme --env GH_TOKEN -- gh pr create --repo acme/shop --fill
 keymule install github-acme --host github.com --username acme-bot
 git remote set-url origin https://acme-bot@github.com/acme/shop.git
 
-# CI: put a stored secret into the repo's Actions secrets (encrypted locally)
-keymule gh-secret stripe-acme --repo acme/shop --as STRIPE_SECRET_KEY
+# CI: put stored secrets into the repo's Actions secrets (encrypted locally).
+# One dialog for all of them; uploads with your existing gh login.
+keymule gh-secret --repo acme/ext CWS_CLIENT_ID=cws-id CWS_CLIENT_SECRET=cws-secret \
+  CWS_REFRESH_TOKEN=cws-refresh
 ```
+
+`gh-secret` asks GitHub who each login is before it asks you, so the dialog names the real
+account: *"Copy 3 secrets from keymule into acme/ext's GitHub Actions secrets? … Uploaded as
+acme (admin there), using your gh login."* A token for the wrong account is caught up front,
+with what each login can do on the repo. It borrows gh's token inside keymule for those
+api.github.com calls only; it never prints or stores it, and you don't need a second GitHub
+token in keymule. `--dry-run` shows who would upload and which secrets would be replaced.
 
 Setting up a repo is one dialog: *"Let git use github-acme for github.com as acme-bot? … gh may
 use it in ~/code/shop too."* After that nothing asks again for that repo, including its

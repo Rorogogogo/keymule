@@ -130,6 +130,16 @@ fn command_of(input: &Value) -> Option<String> {
 pub fn run(agent: Agent, stdin: &str) -> Option<String> {
     let input: Value = serde_json::from_str(stdin).ok()?;
     let why = blocked(&command_of(&input)?)?;
+    #[cfg(not(test))]
+    if let Some(cwd) = input["cwd"].as_str()
+        && crate::trust::skips(
+            crate::store::vault().as_ref(),
+            std::path::Path::new(cwd),
+            &format!("guard: {why}"),
+        )
+    {
+        return None; // allow all is on in this folder
+    }
     let reason = format!(
         "keymule blocked this: {why}. Use the token through keymule instead: http_request, \
          `keymule exec <name> --env VAR -- <tool>`, or install_credential for git."

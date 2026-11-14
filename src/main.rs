@@ -15,6 +15,7 @@ mod redact;
 mod remote;
 mod servers;
 mod store;
+mod trust;
 mod tty;
 mod ui;
 mod vault;
@@ -156,19 +157,47 @@ enum Cmd {
         #[arg(long)]
         dir: Option<std::path::PathBuf>,
     },
-    /// Copy a credential into a GitHub Actions secret, encrypted with the
-    /// repo's key (asks you first). Uses your stored GitHub credential.
+    /// Copy credentials into a repo's GitHub Actions secrets, encrypted with
+    /// the repo's key. One dialog for all of them. Uploads with the account
+    /// gh is signed in as, or a GitHub credential in keymule, whichever has
+    /// admin on the repo.
+    ///
+    /// keymule gh-secret --repo acme/shop STRIPE_SECRET_KEY=stripe-acme
+    /// keymule gh-secret --repo acme/ext CWS_CLIENT_ID=cws-id CWS_CLIENT_SECRET=cws-secret
+    #[command(verbatim_doc_comment)]
     GhSecret {
-        name: String,
+        /// SECRET=credential, one or more (or one credential with --as).
+        #[arg(required = true, value_name = "SECRET=CREDENTIAL")]
+        items: Vec<String>,
         /// owner/repo
         #[arg(long)]
         repo: String,
-        /// The Actions secret to create or replace, e.g. STRIPE_SECRET_KEY.
+        /// The Actions secret, when copying one credential given by name.
         #[arg(long = "as", value_name = "SECRET")]
-        secret: String,
-        /// The GitHub credential to upload with (default: your only one).
+        secret: Option<String>,
+        /// Who uploads: `gh` (gh's active account), `gh:<login>`, or a
+        /// GitHub credential's name. Default: the first with admin on the repo.
         #[arg(long)]
         via: Option<String>,
+        /// Only say who would upload and what would change; ask nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Allow all: one dialog, then keymule stops asking in this project
+    /// (its git repo, or this folder). Deleting still asks.
+    Allow {
+        /// The folder (default: this folder's git repo).
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+        /// Turn it off here (with --dir, there; with --everywhere, all).
+        #[arg(long, conflicts_with = "status")]
+        off: bool,
+        /// With --off: turn it off in every folder.
+        #[arg(long, requires = "off")]
+        everywhere: bool,
+        /// Say where it's on; change nothing.
+        #[arg(long)]
+        status: bool,
     },
     /// Remove a credential's copies from git's credential store (keeps it
     /// in keymule).
@@ -365,30 +394,91 @@ async fn run(cli: Cli) -> Result<()> {
                 &host,
                 &username,
                 cli,
-                &|m| dialog::confirm(m),
+                &|m| trust::confirm(m),
                 &install::RealGit,
             )?;
             println!("{msg}");
             Ok(())
         }
         Cmd::GhSecret {
-            name,
+            items,
             repo,
             secret,
             via,
+            dry_run,
         } => {
             let store = Store::load()?;
+            let transfers = ghsecret::parse_transfers(&items, secret.as_deref())?;
+            let via = via.as_deref().map(ghsecret::Via::parse);
             let msg = ghsecret::push(
                 store::vault().as_ref(),
                 &store,
-                &name,
+                &transfers,
                 &repo,
-                &secret,
-                via.as_deref(),
-                &|m| dialog::confirm(m),
+                via.as_ref(),
+                dry_run,
+                &|m| trust::confirm(m),
             )
             .await?;
             println!("{msg}");
+            Ok(())
+        }
+        Cmd::Allow {
+            dir,
+            off,
+            everywhere,
+            status,
+        } => {
+            let vault = store::vault();
+            let here = match dir {
+                Some(d) => d,
+                None => std::env::current_dir()?,
+            };
+            let project = trust::project_of(&here);
+            if status {
+                let on = trust::list(vault.as_ref(), trust::now());
+                if on.is_empty() {
+                    println!("Allow all is off everywhere: keymule asks before each use.");
+                }
+                for a in on {
+                    println!(
+                        "Allow all is on in {}, {}.",
+                        cliexec::tilde(std::path::Path::new(&a.dir)),
+                        trust::until_text(&a)
+                    );
+                }
+            } else if off {
+                let gone = trust::revoke(vault.as_ref(), (!everywhere).then_some(here.as_path()))?;
+                if gone.is_empty() {
+                    println!("Allow all wasn't on there; nothing changed.");
+                }
+                for a in gone {
+                    http::audit("-", "ALLOW-ALL-OFF", &a.dir, 0);
+                    println!(
+                        "Allow all is off in {}: keymule asks again.",
+                        cliexec::tilde(std::path::Path::new(&a.dir))
+                    );
+                }
+            } else if let Some(a) = trust::covering(vault.as_ref(), &project, trust::now()) {
+                println!(
+                    "Allow all is already on in {}, {}.",
+                    cliexec::tilde(std::path::Path::new(&a.dir)),
+                    trust::until_text(&a)
+                );
+            } else {
+                match trust::ask(vault.as_ref(), &project)? {
+                    Some(a) => {
+                        http::audit("-", "ALLOW-ALL-ON", &a.dir, 0);
+                        println!(
+                            "Allow all is on in {}, {}. keymule won't ask there again, \
+                             except before deleting. Turn it off: keymule allow --off",
+                            cliexec::tilde(&project),
+                            trust::until_text(&a)
+                        );
+                    }
+                    None => bail!("the user didn't turn on allow all; keymule keeps asking"),
+                }
+            }
             Ok(())
         }
         Cmd::Uninstall {
@@ -424,7 +514,11 @@ async fn run(cli: Cli) -> Result<()> {
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
             let mut store = Store::load()?;
-            if let Some(out) = hook::run_as(agent, &input, &mut store, store::vault().as_ref()) {
+            if let Some(out) =
+                hook::run_as(agent, &input, &mut store, store::vault().as_ref(), &|m| {
+                    dialog::paste_choice(m)
+                })
+            {
                 println!("{out}");
             }
             Ok(())
@@ -678,7 +772,11 @@ fn edit(
         if !cred.hosts.contains(&host) {
             // Pointing a secret at a new host is exactly what a prompt-injected
             // agent would try, so a human has to approve it on the terminal.
-            tty::confirm(&format!("Allow \"{name}\" to be sent to {host}?"))?;
+            let question = format!("Allow \"{name}\" to be sent to {host}?");
+            let here = std::env::current_dir().unwrap_or_default();
+            if !trust::skips(store::vault().as_ref(), &here, &question) {
+                tty::confirm(&question)?;
+            }
         }
         cred.hosts = presets::hosts_for(presets::get_or_generic(&cred.service), &u)?;
         cred.url = u;
@@ -778,7 +876,9 @@ fn reveal(name: &str) -> Result<()> {
     if items.is_empty() {
         bail!("\"{name}\" holds no secret");
     }
-    if dialog::reveal(name, &items, copy.as_deref())? {
+    let here = std::env::current_dir().unwrap_or_default();
+    let ask = !trust::skips(vault.as_ref(), &here, &format!("reveal \"{name}\""));
+    if dialog::reveal(name, &items, copy.as_deref(), ask)? {
         http::audit(name, "REVEAL", "", 0);
         println!("Showed \"{name}\" in a keymule window. The value isn't printed here.");
     } else {
