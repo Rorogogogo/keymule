@@ -100,8 +100,15 @@ h1, h2, p { margin: 0; }
 }
 .brandline { display: flex; align-items: center; gap: 10px; padding: 2px 10px 18px; }
 .logo { width: 24px; height: 24px; flex-shrink: 0; display: block; }
-.logo-bg { fill: var(--ink); }
-.logo-fg { fill: var(--bg); }
+/* The logo is black and white: black square in light mode, white in dark. */
+.logo-bg { fill: #000; }
+.logo-fg { fill: #fff; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .logo-bg { fill: #fff; }
+  :root:not([data-theme="light"]) .logo-fg { fill: #000; }
+}
+:root[data-theme="dark"] .logo-bg { fill: #fff; }
+:root[data-theme="dark"] .logo-fg { fill: #000; }
 .brand { font-weight: 600; font-size: 15px; letter-spacing: -0.01em; }
 .nav { display: flex; flex-direction: column; gap: 2px; }
 .nav button, .navbtn {
@@ -253,6 +260,14 @@ h2 { font-size: 18px; font-weight: 600; letter-spacing: -0.015em; }
   font: 13px var(--sans); min-width: 0;
 }
 .field::placeholder { color: var(--ink3); }
+/* Draw the menu ourselves: Safari's engine (used by the menu-bar window)
+   otherwise shows the old glossy macOS pop-up button. */
+.field { -webkit-appearance: none; appearance: none; }
+select.field {
+  padding-right: 30px; cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238792a2' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 9px center; background-size: 13px;
+}
 .addline { display: flex; gap: 8px; margin-top: 16px; }
 .addline .url { flex: 1; font-family: var(--mono); font-size: 12.5px; }
 @media (max-width: 640px) { .addline { flex-wrap: wrap; } .addline .url { flex-basis: 100%; order: 3; } }

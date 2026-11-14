@@ -36,7 +36,7 @@ Agent:  Build #482 failed in "Integration tests"…
 - 📒 **Audit log.** Every request is logged to `~/.config/keymule/audit.log` (without secrets).
 - 🧩 **Service presets.** Bamboo, GitHub (incl. Actions), GitLab, Jenkins, Stripe, OpenAI, or any HTTP API. Presets know the auth scheme, how to verify a token, and give the agent an API cheat-sheet.
 - 🩺 **Leak doctor.** `keymule doctor` finds tokens that already leaked into agent transcripts, sit in plain text in agent configs, or are readable in `.env` files and shell history, so you know what to rotate.
-- 🖥 **Local web page.** `keymule ui` opens a page on your machine with your credentials, MCP servers, live activity and leak scan, with buttons that open keymule's dialogs. **Reveal** shows a stored value in a keymule window when you need to see it yourself, never on the page or in a terminal.
+- 🖥 **Menu bar and local page.** On macOS keymule lives in the menu bar (`keymule menubar`, set up by `keymule init`) and opens its page in its own window; `keymule ui` opens the same page with your credentials, MCP servers, live activity and leak scan, with buttons that open keymule's dialogs. **Reveal** shows a stored value in a keymule window when you need to see it yourself, never on the page or in a terminal.
 - 📦 **Adopt MCP secrets.** `keymule adopt` moves the API keys your MCP server configs keep in plain text into the keychain. The servers start the same way, through `keymule exec`. Remote (HTTP) servers whose API key sits in a header connect through `keymule remote`, which adds the header itself.
 
 ---
@@ -169,7 +169,8 @@ up next to itself as `<name>.keymule-bak`.
 | `keymule allow [--dir D] [--off [--everywhere]] [--status]` | Allow all: one dialog (Cancel / Today / Always), then keymule stops asking in this repo (or `--dir ~` for every folder) (any program including shells, gh-secret, new hosts, reveal, the read-back guard, pasted secrets saved without asking). Deleting still asks; every skipped dialog is logged |
 | `keymule remote <name> <url> [--header "Name: value"]` | Connect to a remote (HTTP) MCP server, adding the headers keymule holds (used in configs). New URLs need your approval once |
 | `keymule ui [--no-open] [--port N]` | Open the local web page (127.0.0.1 only, token in the link it opens) |
-| `keymule init [--dry-run]` | Set up every agent found (see [Agents](#agents)). The first time, it also offers allow-all for your home folder, with Always preselected |
+| `keymule menubar [--background] [--login on\|off]` | keymule in the macOS menu bar: its page in its own window (no browser), with a Dock icon while the window is open. `keymule ui` opens that window when it's running |
+| `keymule init [--dry-run]` | Set up every agent found (see [Agents](#agents)). On macOS it also puts keymule in the menu bar and makes it start at login (first setup only). The first time, it also offers allow-all for your home folder, with Always preselected |
 | `keymule mcp` | The MCP server (started by your agent) |
 | `keymule hook prompt [--agent claude\|codex\|cursor]` | The paste-to-save prompt hook |
 | `keymule hook bash [--agent claude\|codex\|cursor]` | The guard that stops agents reading tokens back out of git, gh or the keychain |

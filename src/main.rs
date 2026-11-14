@@ -10,6 +10,8 @@ mod http;
 mod init;
 mod install;
 mod mcp;
+#[cfg(target_os = "macos")]
+mod menubar;
 mod presets;
 mod redact;
 mod remote;
@@ -226,6 +228,15 @@ enum Cmd {
         /// Port on 127.0.0.1 (default: any free one).
         #[arg(long, default_value_t = 0)]
         port: u16,
+    },
+    /// keymule in the macOS menu bar: its page in its own window, no browser.
+    Menubar {
+        /// Start without opening the window (how it starts at login).
+        #[arg(long)]
+        background: bool,
+        /// Start it at login, or stop that, then exit.
+        #[arg(long, value_name = "on|off", value_parser = ["on", "off"])]
+        login: Option<String>,
     },
     /// Set keymule up in every agent found: Claude Code, Claude Desktop,
     /// Codex, Cursor, Antigravity (MCP server, paste hook, instructions).
@@ -506,6 +517,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Remote { name, url, headers } => {
             remote::run(store::vault().as_ref(), &name, &headers, &url).await
         }
+        Cmd::Menubar { background, login } => menubar_cmd(background, login),
         Cmd::Init { dry_run } => init::run(dry_run),
         Cmd::Mcp => mcp::serve().await,
         Cmd::Hook {
@@ -1072,4 +1084,28 @@ fn rm(name: &str, dialog: bool) -> Result<()> {
     store.save()?;
     println!("Deleted \"{name}\".");
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn menubar_cmd(background: bool, login: Option<String>) -> Result<()> {
+    match login.as_deref() {
+        Some(v) => {
+            menubar::set_login(v == "on")?;
+            println!(
+                "{}",
+                if v == "on" {
+                    "keymule will start in the menu bar at login."
+                } else {
+                    "keymule won't start at login any more."
+                }
+            );
+            Ok(())
+        }
+        None => menubar::run(background),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn menubar_cmd(_background: bool, _login: Option<String>) -> Result<()> {
+    bail!("the menu bar app is macOS-only; use `keymule ui`")
 }

@@ -59,6 +59,32 @@ pub fn detect(home: &Path) -> Found {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn menubar_setup() -> Result<Vec<String>> {
+    let mark = crate::store::config_dir()?.join("menubar-set-up");
+    let mut out = vec![];
+    if mark.exists() {
+        out.push(format!(
+            "· start at login is {} (change it from the menu bar icon)",
+            if crate::menubar::starts_at_login() {
+                "on"
+            } else {
+                "off"
+            }
+        ));
+    } else {
+        crate::menubar::set_login(true)?;
+        std::fs::write(&mark, "")?;
+        out.push("✓ keymule starts in the menu bar at login".into());
+    }
+    if crate::menubar::launch()? {
+        out.push("✓ started keymule in the menu bar (the key icon)".into());
+    } else {
+        out.push("· keymule is already in the menu bar".into());
+    }
+    Ok(out)
+}
+
 pub fn run(dry_run: bool) -> Result<()> {
     let exe = std::env::current_exe()?.canonicalize()?;
     let exe_s = exe.to_string_lossy().to_string();
@@ -153,7 +179,24 @@ pub fn run(dry_run: bool) -> Result<()> {
         println!("{line}");
     }
 
-    // 4. Allow all, offered once on first setup (Always is the default).
+    // 4. The menu bar app: set to start at login on first setup only, so
+    // turning it off later sticks.
+    #[cfg(target_os = "macos")]
+    {
+        println!("\nMenu bar");
+        if dry_run {
+            println!("would make keymule start in the menu bar at login, and start it now");
+        } else {
+            match menubar_setup() {
+                Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
+                Err(e) => {
+                    println!("· couldn't set up the menu bar app ({e}); run: keymule menubar")
+                }
+            }
+        }
+    }
+
+    // 5. Allow all, offered once on first setup (Always is the default).
     println!("\nAllow all");
     if dry_run {
         println!("would offer allow-all for ~ (first setup only)");
