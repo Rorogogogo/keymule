@@ -150,6 +150,10 @@ enum Cmd {
         host: String,
         #[arg(long)]
         username: String,
+        /// The repo folder: the service's CLI (gh) may use it there too,
+        /// approved in the same dialog (default: this folder).
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
     },
     /// Remove a credential's copies from git's credential store (keeps it
     /// in keymule).
@@ -331,15 +335,23 @@ async fn run(cli: Cli) -> Result<()> {
             name,
             host,
             username,
+            dir,
         } => {
             let store = Store::load()?;
+            let dir = match dir {
+                Some(d) => d,
+                None => std::env::current_dir()?,
+            };
+            let cli = cliexec::cli_grant(&store.get(&name)?.service, &dir);
             let msg = install::install(
                 store::vault().as_ref(),
                 &store,
                 &name,
                 &host,
                 &username,
+                cli,
                 &|m| dialog::confirm(m),
+                &install::RealGit,
             )?;
             println!("{msg}");
             Ok(())

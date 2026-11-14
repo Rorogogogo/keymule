@@ -163,7 +163,7 @@ up next to itself as `<name>.keymule-bak`.
 | `keymule doctor [--all] [--json] [--dir D]` | Find leaked and plain-text secrets |
 | `keymule adopt [--dry-run] [--yes] [--server NAME]` | Move plain-text MCP server secrets into the keychain |
 | `keymule exec <name> [--env VAR] -- <command…>` | Start an MCP server with its secrets (used in configs), or run a CLI tool with a stored credential in an env var. New commands need your approval once |
-| `keymule install <name> --host H --username U` | Copy a credential into git's credential store, so git uses it for `https://U@H` (asks you first) |
+| `keymule install <name> --host H --username U [--dir D]` | Copy a credential into git's credential store, so git uses it for `https://U@H`; the same dialog lets the service's CLI (gh) use it in the repo folder |
 | `keymule uninstall <name> [--host H] [--username U]` | Remove those copies again (the credential stays in keymule) |
 | `keymule remote <name> <url> [--header "Name: value"]` | Connect to a remote (HTTP) MCP server, adding the headers keymule holds (used in configs). New URLs need your approval once |
 | `keymule ui [--no-open] [--port N]` | Open the local web page (127.0.0.1 only, token in the link it opens) |
@@ -196,25 +196,31 @@ token passing through the chat or your clipboard.
 # gh, glab and other CLIs: the token goes into the env var the tool reads
 keymule exec github-acme --env GH_TOKEN -- gh pr create --repo acme/shop --fill
 
-# git over HTTPS: copy the token into git's own credential store, once
+# git over HTTPS: copy the token into git's own credential store, once.
+# Run in the repo: the same dialog also lets gh use it in this folder.
 keymule install github-acme --host github.com --username acme-bot
 git remote set-url origin https://acme-bot@github.com/acme/shop.git
 ```
 
-- **exec** asks you once per program and folder, in a dialog. It refuses shells, interpreters
-  and tools that just print their environment (`sh`, `python`, `env`, `cat`…), including scripts
-  run by one. It scrubs the token from the tool's output, as is, URL-encoded or base64. The tool
-  itself does get the token, so only allow tools you trust.
+Setting up a repo is one dialog: *"Let git use github-acme for github.com as acme-bot? … gh may
+use it in ~/code/shop too."* After that nothing asks again for that repo, including its
+subfolders.
+
+- **exec** asks once per program and folder (subfolders included), in a dialog. It refuses
+  shells, interpreters and tools that just print their environment (`sh`, `python`, `env`,
+  `cat`…), including scripts run by one. It scrubs the token from the tool's output, as is,
+  URL-encoded or base64. The tool itself does get the token, so only allow tools you trust.
 - **install** runs `git credential approve` itself, with the token on stdin, so it lands in
   whatever helper git uses (osxkeychain, Git Credential Manager…). keymule remembers the copy:
-  `rotate` updates it, `rm` and `uninstall` erase it. Repos whose remote URL names another
-  account keep using that one. To keep your usual account the default everywhere else, set
+  `rotate` updates it, `rm` and `uninstall` erase it. Installing the same copy again asks
+  nothing. Repos whose remote URL names another account keep using that one. To keep your usual
+  account the default everywhere else, set
   `git config --global credential.https://github.com.username <you>` once.
 - Once the token is in git's store, anything you run could ask git for it. keymule's agent hook
   (`keymule hook bash`) blocks the usual ways to read it back: `git credential fill`, asking a
   helper directly, `security find-…-password -w`, `gh auth token`, and `~/.git-credentials` or gh's
-  `hosts.yml`. It always blocks them, installed or not. It matches command text, so it's a guard
-  rail, not a wall.
+  `hosts.yml`. It always blocks them, installed or not. It matches command text (skipping
+  heredocs that only write a file), so it's a guard rail, not a wall.
 
 A GitHub credential at `api.github.com` may also be used for `github.com` and
 `uploads.github.com`.

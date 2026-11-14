@@ -115,6 +115,34 @@ pub fn refused(name: &str) -> bool {
     REFUSED.contains(&name) || REFUSED.contains(&base)
 }
 
+/// `path` with the home folder shown as `~`, for dialogs.
+pub fn tilde(path: &Path) -> String {
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(home) => match path.strip_prefix(&home) {
+            Ok(rel) if rel.as_os_str().is_empty() => "~".into(),
+            Ok(rel) => format!("~/{}", rel.display()),
+            Err(_) => path.display().to_string(),
+        },
+        None => path.display().to_string(),
+    }
+}
+
+/// The approval `keymule exec` would need for the service's own CLI (gh
+/// for GitHub) in `dir`, if that CLI is installed. For approving it ahead,
+/// together with another dialog.
+pub fn cli_grant(service: &str, dir: &Path) -> Option<(String, ExecGrant)> {
+    let (_, cli) = presets::get_or_generic(service).cli_env?;
+    let path = resolve(cli).ok()?;
+    let dir = dir.canonicalize().ok()?;
+    Some((
+        cli.to_string(),
+        ExecGrant {
+            program: path.to_string_lossy().into_owned(),
+            dir: dir.to_string_lossy().into_owned(),
+        },
+    ))
+}
+
 fn file_name(p: &Path) -> String {
     p.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -215,30 +243,34 @@ pub fn prepare(
     let path = resolve(program)?;
     let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let mut sealed = Sealed::load(vault, name, store.get(name)?)?;
-    let grant = ExecGrant {
-        program: path.to_string_lossy().into_owned(),
-        dir: dir.to_string_lossy().into_owned(),
-    };
-    if !sealed.exec_grants.contains(&grant) {
+    let program_s = path.to_string_lossy().into_owned();
+    if !sealed
+        .exec_grants
+        .iter()
+        .any(|g| g.covers(&program_s, &dir))
+    {
+        let tool = file_name(&path);
         let allowed = confirm(&format!(
-            "An agent wants to run a program with your keymule credential \"{name}\" (in {}).\n\n\
-             Program:  {}\nFolder:  {}\n\nCommand:\n\n        {}\n\n\
-             If you allow it, this program can use \"{name}\" in this folder from now on without \
-             asking. keymule hides the secret in its output, but the program itself gets it: \
-             only allow tools you trust.",
+            "Let {tool} use \"{name}\" in {}?\n\n\
+             It gets the token as {}; keymule hides it in {tool}'s output. You won't be asked \
+             again for {tool} in this folder.\n\n\
+             Command:  {}\nProgram:  {}",
+            tilde(&dir),
             vars.join(", "),
-            grant.program,
-            grant.dir,
-            argv.join(" ")
+            argv.join(" "),
+            tilde(&path),
         ))
         .context("keymule needs to ask you about a new program, but can't show a dialog here")?;
         if !allowed {
             bail!(
                 "you didn't allow `{program}` to use \"{name}\" in {}; it was not run",
-                grant.dir
+                dir.display()
             );
         }
-        sealed.exec_grants.push(grant);
+        sealed.exec_grants.push(ExecGrant {
+            program: program_s,
+            dir: dir.to_string_lossy().into_owned(),
+        });
         sealed.save(vault, name)?;
     }
     let mut cmd = Command::new(&path);
@@ -451,6 +483,10 @@ mod tests {
         );
         run("true --other args", dir.path()).unwrap();
         assert_eq!(asked.get(), 1, "same program, same folder");
+        let sub = dir.path().join("web/app");
+        std::fs::create_dir_all(&sub).unwrap();
+        run("true", &sub).unwrap();
+        assert_eq!(asked.get(), 1, "a folder inside it is covered");
         let other = tempfile::tempdir().unwrap();
         run("true", other.path()).unwrap();
         assert_eq!(asked.get(), 2, "a new folder asks again");

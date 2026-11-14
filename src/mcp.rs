@@ -34,7 +34,8 @@ add_mcp_secret with `header` instead of `env`, and configure it as a stdio serve
 first starts. When a command-line tool needs a stored credential (gh, glab...), run it as \
 `keymule exec <name> --env GH_TOKEN -- gh ...`: the user approves each program and folder once, \
 the secret is hidden from its output, and shells and interpreters are refused. For git over \
-HTTPS, call install_credential (name, host, username) and point the repo's remote at \
+HTTPS, call install_credential (name, host, username, dir = the repo folder; one dialog also \
+approves the service's CLI there) and point the repo's remote at \
 https://<username>@<host>/<owner>/<repo>.git. Never read a token back (git credential fill, \
 gh auth token, security find-*-password -w).";
 
@@ -47,6 +48,10 @@ pub struct InstallArgs {
     /// The account the credential belongs to, as it will appear in the remote URL
     /// (https://<username>@<host>/...).
     pub username: String,
+    /// The repo folder (absolute path). The service's CLI (gh for GitHub) is then
+    /// approved there in the same dialog, so `keymule exec <name> -- gh ...` won't ask again.
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -650,7 +655,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Copy a stored credential into git's own credential store (macOS keychain, Git Credential Manager...) so git push/pull over HTTPS works as that account. The user approves in a dialog; you never see the secret. Afterwards point the repo's remote at https://<username>@<host>/<owner>/<repo>.git. keymule keeps the copy updated on rotate and removes it on delete."
+        description = "Copy a stored credential into git's own credential store (macOS keychain, Git Credential Manager...) so git push/pull over HTTPS works as that account. The user approves in a dialog; you never see the secret. Pass `dir` (the repo folder) and the same dialog also lets the service's CLI (gh) use it there. Afterwards point the repo's remote at https://<username>@<host>/<owner>/<repo>.git. keymule keeps the copy updated on rotate and removes it on delete."
     )]
     async fn install_credential(
         &self,
@@ -658,13 +663,21 @@ impl Server {
     ) -> Result<CallToolResult, McpError> {
         let result = tokio::task::spawn_blocking(move || {
             let store = Store::load()?;
+            let cli = args.dir.as_deref().and_then(|d| {
+                crate::cliexec::cli_grant(
+                    &store.get(&args.name).ok()?.service,
+                    std::path::Path::new(d),
+                )
+            });
             crate::install::install(
                 store::vault().as_ref(),
                 &store,
                 &args.name,
                 &args.host,
                 &args.username,
+                cli,
                 &|m| dialog::confirm(m),
+                &crate::install::RealGit,
             )
         })
         .await
