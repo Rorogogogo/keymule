@@ -390,7 +390,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("`sh`"), "{err}");
+        assert!(err.contains("won't hand a credential"), "{err}"); // sh, or dash on Linux
     }
 
     #[test]
