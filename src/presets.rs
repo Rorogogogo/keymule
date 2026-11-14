@@ -106,6 +106,39 @@ pub const PRESETS: &[Preset] = &[
         cli_env: None,
     },
     Preset {
+        id: "stripe",
+        title: "Stripe",
+        default_url: Some("https://api.stripe.com"),
+        url_example: "https://api.stripe.com",
+        auth: AuthKind::Bearer,
+        verify_path: Some("/v1/balance"),
+        accept: "application/json",
+        keywords: &["stripe"],
+        hint: "Stripe REST API (form-encoded bodies, not JSON). \
+               Check the key: GET /v1/balance. \
+               Products and prices: GET /v1/products?limit=10, GET /v1/prices?product={id}. \
+               Subscriptions: GET /v1/subscriptions?limit=10&status=all, GET /v1/subscriptions/{id}. \
+               Customers: GET /v1/customers?email={email}. \
+               Webhooks: GET /v1/webhook_endpoints. \
+               Recent failures: GET /v1/events?type=invoice.payment_failed&limit=10.",
+        extra_hosts: &[],
+        cli_env: Some(("STRIPE_API_KEY", "stripe")),
+    },
+    Preset {
+        id: "openai",
+        title: "OpenAI",
+        default_url: Some("https://api.openai.com/v1"),
+        url_example: "https://api.openai.com/v1",
+        auth: AuthKind::Bearer,
+        verify_path: Some("/models"),
+        accept: "application/json",
+        keywords: &["openai", "chatgpt"],
+        hint: "OpenAI REST API. Models: GET /models. \
+               Responses: POST /responses with {\"model\": \"...\", \"input\": \"...\"}.",
+        extra_hosts: &[],
+        cli_env: Some(("OPENAI_API_KEY", "openai")),
+    },
+    Preset {
         id: "generic",
         title: "Any HTTP API",
         default_url: None,

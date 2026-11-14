@@ -36,7 +36,10 @@ first starts. When a command-line tool needs a stored credential (gh, glab...), 
 the secret is hidden from its output, and shells and interpreters are refused. For git over \
 HTTPS, call install_credential (name, host, username, dir = the repo folder; one dialog also \
 approves the service's CLI there) and point the repo's remote at \
-https://<username>@<host>/<owner>/<repo>.git. Never read a token back (git credential fill, \
+https://<username>@<host>/<owner>/<repo>.git. To put a stored secret into a repo's GitHub \
+Actions secrets (for CI), run `keymule gh-secret <name> --repo <owner>/<repo> --as \
+<SECRET_NAME>`: keymule encrypts it with the repo's key and the user approves it in a dialog; \
+never move a secret through the clipboard, a file or the chat. Never read a token back (git credential fill, \
 gh auth token, security find-*-password -w).";
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -531,6 +534,11 @@ impl Server {
                 let mut how = vec![format!("http_request(credential=\"{name}\", ...)")];
                 let (var, cli) = preset.cli_env.unwrap_or(("VAR", "<command>"));
                 how.push(format!("CLI tools: keymule exec {name} --env {var} -- {cli} ..."));
+                if c.service != "github" {
+                    how.push(format!(
+                        "GitHub Actions secret: keymule gh-secret {name} --repo <owner>/<repo> --as <SECRET_NAME>"
+                    ));
+                }
                 if c.service == "github" || c.service == "gitlab" {
                     how.push(format!(
                         "git over HTTPS: install_credential(name=\"{name}\", host=..., username=<account>)"

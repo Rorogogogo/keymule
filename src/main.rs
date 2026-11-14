@@ -3,6 +3,7 @@ mod cliexec;
 mod detect;
 mod dialog;
 mod doctor;
+mod ghsecret;
 mod guard;
 mod hook;
 mod http;
@@ -154,6 +155,20 @@ enum Cmd {
         /// approved in the same dialog (default: this folder).
         #[arg(long)]
         dir: Option<std::path::PathBuf>,
+    },
+    /// Copy a credential into a GitHub Actions secret, encrypted with the
+    /// repo's key (asks you first). Uses your stored GitHub credential.
+    GhSecret {
+        name: String,
+        /// owner/repo
+        #[arg(long)]
+        repo: String,
+        /// The Actions secret to create or replace, e.g. STRIPE_SECRET_KEY.
+        #[arg(long = "as", value_name = "SECRET")]
+        secret: String,
+        /// The GitHub credential to upload with (default: your only one).
+        #[arg(long)]
+        via: Option<String>,
     },
     /// Remove a credential's copies from git's credential store (keeps it
     /// in keymule).
@@ -356,6 +371,26 @@ async fn run(cli: Cli) -> Result<()> {
             println!("{msg}");
             Ok(())
         }
+        Cmd::GhSecret {
+            name,
+            repo,
+            secret,
+            via,
+        } => {
+            let store = Store::load()?;
+            let msg = ghsecret::push(
+                store::vault().as_ref(),
+                &store,
+                &name,
+                &repo,
+                &secret,
+                via.as_deref(),
+                &|m| dialog::confirm(m),
+            )
+            .await?;
+            println!("{msg}");
+            Ok(())
+        }
         Cmd::Uninstall {
             name,
             host,
@@ -407,24 +442,36 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Hook {
             kind: HookKind::Scan,
         } => {
+            let cwd = std::env::current_dir()
+                .ok()
+                .and_then(|d| d.to_str().map(str::to_string));
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
             let store = Store::load()?;
             println!(
                 "{}",
-                hook::scan_json(&input, &store, store::vault().as_ref())
+                hook::scan_json(&input, cwd.as_deref(), &store, store::vault().as_ref())
             );
             Ok(())
         }
         Cmd::Hook {
             kind: HookKind::Save { name },
         } => {
+            let cwd = std::env::current_dir()
+                .ok()
+                .and_then(|d| d.to_str().map(str::to_string));
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
             let mut store = Store::load()?;
             println!(
                 "{}",
-                hook::save_json(&input, name.as_deref(), &mut store, store::vault().as_ref())
+                hook::save_json(
+                    &input,
+                    cwd.as_deref(),
+                    name.as_deref(),
+                    &mut store,
+                    store::vault().as_ref()
+                )
             );
             Ok(())
         }

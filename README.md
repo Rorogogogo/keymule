@@ -30,11 +30,11 @@ Agent:  Build #482 failed in "Integration tests"…
 
 - 🙈 **The agent never sees the secret.** It refers to credentials by name; the secret is attached inside keymule and redacted from every response.
 - 🔒 **Locked to hosts.** A Bamboo token only goes to your Bamboo host. Requests elsewhere are refused, and redirects to other hosts are followed *without* the token. The allowed hosts are sealed in the keychain with the token, so editing keymule's files doesn't change them.
-- ✋ **Paste-to-save.** Paste a token into Claude Code by habit and a hook catches it *before* it is sent and asks, right in the terminal: type `y` to save it under a name taken from your message (`github-launchstory` for "the PAT for our launchstory account"), with your words as its description so the agent picks the right one later, or `y <name>` and your message goes on with the token swapped for its keymule name, or `n` to send it as it was.
+- ✋ **Paste-to-save.** Paste a token into Claude Code by habit and a hook catches it *before* it is sent and asks, right in the terminal: type `y` to save it under a name taken from your message (`github-launchstory` for "the PAT for our launchstory account"; a bare Stripe key pasted in your `LaunchStory` repo becomes `stripe-launchstory`), with your words as its description so the agent picks the right one later, or `y <name>` and your message goes on with the token swapped for its keymule name, or `n` to send it as it was.
 - 🧑‍💻 **A human approves the dangerous bits.** Pointing a credential at a new host or deleting it needs you at a real terminal, so a prompt-injected agent can't redirect your token.
 - 🚫 **No reveal command.** There is deliberately no `keymule get`; an agent with a shell could just run it.
 - 📒 **Audit log.** Every request is logged to `~/.config/keymule/audit.log` (without secrets).
-- 🧩 **Service presets.** Bamboo, GitHub (incl. Actions), GitLab, Jenkins, or any HTTP API. Presets know the auth scheme, how to verify a token, and give the agent an API cheat-sheet.
+- 🧩 **Service presets.** Bamboo, GitHub (incl. Actions), GitLab, Jenkins, Stripe, OpenAI, or any HTTP API. Presets know the auth scheme, how to verify a token, and give the agent an API cheat-sheet.
 - 🩺 **Leak doctor.** `keymule doctor` finds tokens that already leaked into agent transcripts, sit in plain text in agent configs, or are readable in `.env` files and shell history, so you know what to rotate.
 - 🖥 **Local web page.** `keymule ui` opens a page on your machine with your credentials, MCP servers, live activity and leak scan, with buttons that open keymule's dialogs. **Reveal** shows a stored value in a keymule window when you need to see it yourself, never on the page or in a terminal.
 - 📦 **Adopt MCP secrets.** `keymule adopt` moves the API keys your MCP server configs keep in plain text into the keychain. The servers start the same way, through `keymule exec`. Remote (HTTP) servers whose API key sits in a header connect through `keymule remote`, which adds the header itself.
@@ -165,6 +165,7 @@ up next to itself as `<name>.keymule-bak`.
 | `keymule exec <name> [--env VAR] -- <command…>` | Start an MCP server with its secrets (used in configs), or run a CLI tool with a stored credential in an env var. New commands need your approval once |
 | `keymule install <name> --host H --username U [--dir D]` | Copy a credential into git's credential store, so git uses it for `https://U@H`; the same dialog lets the service's CLI (gh) use it in the repo folder |
 | `keymule uninstall <name> [--host H] [--username U]` | Remove those copies again (the credential stays in keymule) |
+| `keymule gh-secret <name> --repo O/R --as SECRET [--via GH]` | Copy a credential into a GitHub Actions secret for CI: encrypted with the repo's key and uploaded with your stored GitHub credential, after you allow it in a dialog |
 | `keymule remote <name> <url> [--header "Name: value"]` | Connect to a remote (HTTP) MCP server, adding the headers keymule holds (used in configs). New URLs need your approval once |
 | `keymule ui [--no-open] [--port N]` | Open the local web page (127.0.0.1 only, token in the link it opens) |
 | `keymule init [--dry-run]` | Set up every agent found (see [Agents](#agents)) |
@@ -200,6 +201,9 @@ keymule exec github-acme --env GH_TOKEN -- gh pr create --repo acme/shop --fill
 # Run in the repo: the same dialog also lets gh use it in this folder.
 keymule install github-acme --host github.com --username acme-bot
 git remote set-url origin https://acme-bot@github.com/acme/shop.git
+
+# CI: put a stored secret into the repo's Actions secrets (encrypted locally)
+keymule gh-secret stripe-acme --repo acme/shop --as STRIPE_SECRET_KEY
 ```
 
 Setting up a repo is one dialog: *"Let git use github-acme for github.com as acme-bot? … gh may

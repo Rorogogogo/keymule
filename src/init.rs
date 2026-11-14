@@ -17,6 +17,7 @@ const MD_BLOCK: &str = "## Credentials (keymule)
 - When setting up an MCP server that needs a password, API key or database URL, never write it into the MCP config: call `add_mcp_secret` (I type it in a dialog), then run the server as `keymule exec <name> [--env VAR] -- <server command>`. For a remote (HTTP) server whose API key goes in a header, call `add_mcp_secret` with `header`, then run it as a stdio server: `keymule remote <name> <url>`.
 - When a command-line tool needs a stored credential (gh, glab…), run it through keymule: `keymule exec <name> --env GH_TOKEN -- gh pr create …`. I approve each program and folder once; the token is hidden from its output.
 - For git over HTTPS as a stored account, call `install_credential` (name, host, username, and dir: the repo folder, so gh is approved in the same dialog), then point the repo's remote at `https://<username>@<host>/<owner>/<repo>.git`.
+- When a CI pipeline needs a stored secret, copy it into the repo's GitHub Actions secrets with `keymule gh-secret <name> --repo <owner>/<repo> --as <SECRET_NAME>` (I approve it in a dialog). Never move a secret through the clipboard, a file or the chat. If the secret isn't in keymule yet, call `add_credential` first.
 - Never try to read secrets from the keychain, `security`, `git credential fill`, `gh auth token`, or keymule's files.";
 
 fn home() -> Result<PathBuf> {
