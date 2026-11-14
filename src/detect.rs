@@ -36,6 +36,11 @@ static PREFIXED: LazyLock<Vec<(Regex, Option<&'static str>, &'static str)>> = La
             "GitLab token",
         ),
         (r"\b(sk-ant-[A-Za-z0-9_-]{20,})", None, "Anthropic API key"),
+        (
+            r"\b(sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,})",
+            Some("openai"),
+            "OpenAI API key",
+        ),
         (r"\b(sk-[A-Za-z0-9_-]{20,})", None, "OpenAI-style API key"),
         (r"\b(xox[abprs]-[A-Za-z0-9-]{10,})", None, "Slack token"),
         (r"\b(AKIA[0-9A-Z]{16})\b", None, "AWS access key ID"),
@@ -44,12 +49,12 @@ static PREFIXED: LazyLock<Vec<(Regex, Option<&'static str>, &'static str)>> = La
         (r"\b(npm_[A-Za-z0-9]{30,})", None, "npm token"),
         (
             r"\b((?:sk|rk)_live_[A-Za-z0-9]{20,})",
-            None,
+            Some("stripe"),
             "Stripe live key",
         ),
         (
             r"\b((?:sk|rk)_test_[A-Za-z0-9]{20,})",
-            None,
+            Some("stripe"),
             "Stripe test key",
         ),
     ]
@@ -312,6 +317,30 @@ fn shannon(s: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stripe_and_openai_keys_map_to_their_presets() {
+        // Split so the source never holds something that looks like a real key.
+        let f = scan(concat!(
+            "sk_",
+            "live_",
+            "51ExampleExampleExample0123456789abcd"
+        ));
+        assert_eq!(f[0].service, Some("stripe"));
+        let f = scan(concat!(
+            "rk_",
+            "test_",
+            "51ExampleExampleExample0123456789abcd"
+        ));
+        assert_eq!(f[0].service, Some("stripe"));
+        let f = scan("sk-proj-Example_Example-Example0123456789");
+        assert_eq!(
+            (f[0].service, f[0].label.as_deref()),
+            (Some("openai"), Some("OpenAI API key"))
+        );
+        // Plain sk- keys are used by other services too: no guess.
+        assert_eq!(scan("sk-ExampleExampleExample0123456789")[0].service, None);
+    }
 
     #[test]
     fn finds_prefixed_github_token() {

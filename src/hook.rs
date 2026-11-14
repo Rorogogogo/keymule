@@ -43,6 +43,10 @@ struct HookInput {
     /// Cursor calls it `conversation_id`.
     #[serde(default, alias = "conversation_id")]
     session_id: String,
+    /// The folder the agent works in; names a secret's project when the
+    /// message doesn't.
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -50,6 +54,8 @@ struct Pending {
     session: String,
     at: u64,
     prompt: String,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -87,7 +93,15 @@ fn run(stdin: &str, store: &mut Store, vault: &dyn Vault) -> Option<String> {
 /// Returns the JSON to print on stdout, or None to let the prompt through.
 pub fn run_as(agent: Agent, stdin: &str, store: &mut Store, vault: &dyn Vault) -> Option<String> {
     let input: HookInput = serde_json::from_str(stdin).ok()?;
-    let outcome = handle_as(agent, &input.prompt, &input.session_id, store, vault, now());
+    let outcome = handle_as(
+        agent,
+        &input.prompt,
+        &input.session_id,
+        input.cwd.as_deref(),
+        store,
+        vault,
+        now(),
+    );
     let out = match (agent, outcome) {
         (Agent::Cursor, Outcome::Pass) => serde_json::json!({ "continue": true }),
         (_, Outcome::Pass) => return None,
@@ -137,13 +151,14 @@ fn parse_reply(prompt: &str) -> Option<Reply> {
 
 #[cfg(test)]
 fn handle(prompt: &str, session: &str, store: &mut Store, vault: &dyn Vault, at: u64) -> Outcome {
-    handle_as(Agent::Claude, prompt, session, store, vault, at)
+    handle_as(Agent::Claude, prompt, session, None, store, vault, at)
 }
 
 pub fn handle_as(
     agent: Agent,
     prompt: &str,
     session: &str,
+    cwd: Option<&str>,
     store: &mut Store,
     vault: &dyn Vault,
     at: u64,
@@ -151,7 +166,7 @@ pub fn handle_as(
     if let Some(reply) = parse_reply(prompt)
         && let Some(p) = take_pending(vault, session, at)
     {
-        return answer(agent, &p.prompt, reply, store, vault);
+        return answer(agent, &p.prompt, p.cwd.as_deref(), reply, store, vault);
     }
     if prompt.contains(IGNORE_MARKER) {
         return Outcome::Pass;
@@ -164,17 +179,18 @@ pub fn handle_as(
         session: session.to_string(),
         at,
         prompt: prompt.to_string(),
+        cwd: cwd.map(str::to_string),
     })
     .unwrap_or_default();
     if let Err(e) = vault.set(PENDING, &held) {
         // Can't hold it for an answer: keep the old behaviour and save now.
-        let (_, notes) = save_all(prompt, None, store, vault);
+        let (_, notes) = save_all(prompt, cwd, None, store, vault);
         return Outcome::Block(format!(
             "keymule couldn't hold your message ({e:#}), so it saved the secret and stopped the message.\nkeymule saved {}.\nSend your message again without the secret.",
             notes.join(", ")
         ));
     }
-    Outcome::Block(question(agent, prompt, &found, store, vault))
+    Outcome::Block(question(agent, prompt, cwd, &found, store, vault))
 }
 
 fn take_pending(vault: &dyn Vault, session: &str, at: u64) -> Option<Pending> {
@@ -194,6 +210,7 @@ fn describe(f: &detect::Found) -> String {
 fn question(
     agent: Agent,
     prompt: &str,
+    cwd: Option<&str>,
     found: &[detect::Found],
     store: &Store,
     vault: &dyn Vault,
@@ -201,7 +218,7 @@ fn question(
     // Cursor can't send a changed message, so `y` there saves and hands
     // back the message to send again.
     let resend = agent == Agent::Cursor;
-    let hint = context_hint(prompt, found);
+    let hint = name_hint(prompt, found, cwd);
     let what = if found.len() == 1 {
         format!("it has a {}", describe(&found[0]))
     } else {
@@ -257,6 +274,7 @@ fn question(
 fn answer(
     agent: Agent,
     prompt: &str,
+    cwd: Option<&str>,
     reply: Reply,
     store: &mut Store,
     vault: &dyn Vault,
@@ -278,7 +296,7 @@ fn answer(
         }
         Reply::Save(t) => t,
     };
-    let (message, notes) = save_all(prompt, typed.as_deref(), store, vault);
+    let (message, notes) = save_all(prompt, cwd, typed.as_deref(), store, vault);
     if agent == Agent::Cursor {
         return Outcome::Block(format!(
             "keymule saved {}. Cursor can't send your message for you, so send this instead:\n\n{message}",
@@ -304,12 +322,13 @@ fn answer(
 /// secret.
 fn save_all(
     prompt: &str,
+    cwd: Option<&str>,
     typed: Option<&str>,
     store: &mut Store,
     vault: &dyn Vault,
 ) -> (String, Vec<String>) {
     let found = detect::scan(prompt);
-    let hint = context_hint(prompt, &found);
+    let hint = name_hint(prompt, &found, cwd);
     let mut notes = Vec::new();
     let mut message = prompt.to_string();
     for f in &found {
@@ -347,13 +366,18 @@ fn save_all(
 /// `keymule hook scan`: what a prompt holds, for the Claude Code mod that
 /// asks inline. No secret values in the output: masked ones only, and the
 /// prompt with them taken out.
-pub fn scan_json(prompt: &str, store: &Store, vault: &dyn Vault) -> serde_json::Value {
+pub fn scan_json(
+    prompt: &str,
+    cwd: Option<&str>,
+    store: &Store,
+    vault: &dyn Vault,
+) -> serde_json::Value {
     let found = if prompt.contains(IGNORE_MARKER) {
         vec![]
     } else {
         detect::scan(prompt)
     };
-    let hint = context_hint(prompt, &found);
+    let hint = name_hint(prompt, &found, cwd);
     let mut stripped = prompt.to_string();
     let items: Vec<serde_json::Value> = found
         .iter()
@@ -374,11 +398,12 @@ pub fn scan_json(prompt: &str, store: &Store, vault: &dyn Vault) -> serde_json::
 /// swapped for its keymule name, and a note for the model.
 pub fn save_json(
     prompt: &str,
+    cwd: Option<&str>,
     name: Option<&str>,
     store: &mut Store,
     vault: &dyn Vault,
 ) -> serde_json::Value {
-    let (text, notes) = save_all(prompt, name, store, vault);
+    let (text, notes) = save_all(prompt, cwd, name, store, vault);
     serde_json::json!({
         "text": text,
         "saved": notes,
@@ -514,6 +539,38 @@ fn context_hint(prompt: &str, found: &[detect::Found]) -> Option<String> {
         .collect();
     let slug = slug.trim_matches('-').to_string();
     (!slug.is_empty()).then_some(slug)
+}
+
+/// What to add to a secret's name: what the message says it's for, or else
+/// the git repo the agent works in ("stripe-launchstory" when a bare Stripe
+/// key is pasted in ~/Developer/LaunchStory).
+fn name_hint(prompt: &str, found: &[detect::Found], cwd: Option<&str>) -> Option<String> {
+    context_hint(prompt, found).or_else(|| project_hint(cwd?))
+}
+
+/// The name of the git repo that holds `cwd`, as a slug. None outside a repo
+/// (a home folder says nothing about which project a secret is for).
+fn project_hint(cwd: &str) -> Option<String> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut dir = std::path::Path::new(cwd);
+    let repo = loop {
+        if home.as_deref() == Some(dir) {
+            return None;
+        }
+        if dir.join(".git").exists() {
+            break dir;
+        }
+        dir = dir.parent()?;
+    };
+    let slug: String = repo
+        .file_name()?
+        .to_str()?
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-').to_string();
+    (slug.len() >= 2 && !NOT_A_NAME.contains(&slug.as_str())).then_some(slug)
 }
 
 /// A short description from the message itself, secrets taken out, so the
@@ -700,6 +757,77 @@ mod tests {
         }
     }
 
+    // Split so the source never holds something that looks like a real key.
+    const STRIPE: &str = concat!("sk_", "live_", "51ExampleExampleExample0123456789abcd");
+
+    /// A folder like ~/Developer/LaunchStory: a git repo named LaunchStory.
+    fn repo_dir(name: &str) -> (tempfile::TempDir, String) {
+        let d = tempfile::tempdir().unwrap();
+        let repo = d.path().join(name);
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("client/src")).unwrap();
+        let sub = repo.join("client/src").to_str().unwrap().to_string();
+        (d, sub)
+    }
+
+    #[test]
+    fn a_bare_stripe_key_is_named_after_the_repo_and_locked_to_stripe() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        let (_r, cwd) = repo_dir("LaunchStory");
+        let Outcome::Block(q) = handle_as(Agent::Claude, STRIPE, "s", Some(&cwd), &mut s, &v, 1)
+        else {
+            panic!("should block")
+        };
+        assert!(
+            q.contains("Stripe live key") && q.contains("`stripe-launchstory`"),
+            "{q}"
+        );
+        // The answer comes in a later prompt; the held one remembers the folder.
+        handle_as(Agent::Claude, "y", "s", None, &mut s, &v, 2);
+        let c = &s.creds["stripe-launchstory"];
+        assert_eq!(c.service, "stripe");
+        assert_eq!(c.url, "https://api.stripe.com");
+        assert_eq!(c.hosts, vec!["api.stripe.com".to_string()]);
+        assert_eq!(
+            Sealed::peek_secret(&v, "stripe-launchstory").unwrap(),
+            STRIPE
+        );
+    }
+
+    #[test]
+    fn the_message_beats_the_folder_and_no_repo_means_no_suffix() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        let (_r, cwd) = repo_dir("LaunchStory");
+        let Outcome::Block(q) = handle_as(
+            Agent::Claude,
+            &format!("{STRIPE} for acme"),
+            "s",
+            Some(&cwd),
+            &mut s,
+            &v,
+            1,
+        ) else {
+            panic!()
+        };
+        assert!(q.contains("`stripe-acme`"), "{q}");
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(project_hint(plain.path().to_str().unwrap()), None);
+        let Outcome::Block(q) = handle_as(
+            Agent::Claude,
+            STRIPE,
+            "t",
+            plain.path().to_str(),
+            &mut s,
+            &v,
+            1,
+        ) else {
+            panic!()
+        };
+        assert!(q.contains("`stripe`"), "{q}");
+    }
+
     #[test]
     fn holds_the_prompt_and_asks_in_the_terminal() {
         let (_d, mut s) = store();
@@ -755,7 +883,7 @@ mod tests {
         let (_d, mut s) = store();
         let v = MemVault::default();
         let msg = format!("the pat for the acme org is {GH} thanks");
-        let scan = scan_json(&msg, &s, &v);
+        let scan = scan_json(&msg, None, &s, &v);
         let txt = scan.to_string();
         assert!(!txt.contains(GH), "scan output must not hold the secret");
         assert_eq!(scan["found"][0]["suggested"], "github-acme");
@@ -763,14 +891,17 @@ mod tests {
             scan["stripped"],
             "the pat for the acme org is [secret removed by keymule] thanks"
         );
-        let saved = save_json(&msg, Some("gh-acme"), &mut s, &v);
+        let saved = save_json(&msg, None, Some("gh-acme"), &mut s, &v);
         assert_eq!(
             saved["text"],
             "the pat for the acme org is [saved in keymule as `gh-acme`] thanks"
         );
         assert!(!saved.to_string().contains(GH));
         assert_eq!(Sealed::peek_secret(&v, "gh-acme").unwrap(), GH);
-        assert_eq!(scan_json(&msg, &s, &v)["found"][0]["known"], "gh-acme");
+        assert_eq!(
+            scan_json(&msg, None, &s, &v)["found"][0]["known"],
+            "gh-acme"
+        );
     }
 
     #[test]
