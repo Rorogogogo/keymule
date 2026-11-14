@@ -908,7 +908,7 @@ fn ask_new(dialog: bool, server: &str, what: &str) -> Result<Option<String>> {
         ));
     }
     match dialog::secret(&format!(
-        "Type the new {what} for the \"{server}\" MCP server.\n\nClick Cancel to keep the current one."
+        "Type the new {what} for \"{server}\"\n\nCancel keeps the current one."
     ))? {
         dialog::Answer::Text(s) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
         dialog::Answer::Text(_) | dialog::Answer::Cancelled => Ok(None),
@@ -1037,7 +1037,7 @@ fn rm(name: &str, dialog: bool) -> Result<()> {
     if store.servers.contains_key(name) && !store.creds.contains_key(name) {
         confirm_rm(
             &format!(
-                "Delete MCP server \"{name}\" and its secrets? Configs that run `keymule exec {name}` will stop working."
+                "Delete MCP server \"{name}\"?\n\nIts secrets go too, and configs that run `keymule exec {name}` stop working."
             ),
             dialog,
         )?;
@@ -1056,13 +1056,10 @@ fn rm(name: &str, dialog: bool) -> Result<()> {
         String::new()
     } else {
         let list: Vec<String> = installs.iter().map(|i| i.label()).collect();
-        format!(
-            " Its copy in git's credential store ({}) goes too.",
-            list.join(", ")
-        )
+        format!(" Git's copy ({}) goes too.", list.join(", "))
     };
     confirm_rm(
-        &format!("Delete \"{name}\" and its secret? Agents using it will stop working.{also}"),
+        &format!("Delete \"{name}\"?\n\nAgents using it will stop working.{also}"),
         dialog,
     )?;
     if let Ok(sealed) = Sealed::load(vault.as_ref(), name, &cred) {

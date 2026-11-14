@@ -166,10 +166,10 @@ up next to itself as `<name>.keymule-bak`.
 | `keymule install <name> --host H --username U [--dir D]` | Copy a credential into git's credential store, so git uses it for `https://U@H`; the same dialog lets the service's CLI (gh) use it in the repo folder |
 | `keymule uninstall <name> [--host H] [--username U]` | Remove those copies again (the credential stays in keymule) |
 | `keymule gh-secret --repo O/R SECRET=name… [--via gh\|gh:LOGIN\|CRED] [--dry-run]` | Copy credentials into GitHub Actions secrets for CI, all in one dialog: encrypted with the repo's key, uploaded as the account `gh` is signed in as (or a stored GitHub credential) after keymule checks it has admin on the repo |
-| `keymule allow [--off [--everywhere]] [--status]` | Allow all: one dialog, then keymule stops asking in this repo (any program including shells, gh-secret, new hosts, reveal, the read-back guard, pasted secrets saved without asking). Deleting still asks; every skipped dialog is logged |
+| `keymule allow [--dir D] [--off [--everywhere]] [--status]` | Allow all: one dialog (Cancel / Today / Always), then keymule stops asking in this repo (or `--dir ~` for every folder) (any program including shells, gh-secret, new hosts, reveal, the read-back guard, pasted secrets saved without asking). Deleting still asks; every skipped dialog is logged |
 | `keymule remote <name> <url> [--header "Name: value"]` | Connect to a remote (HTTP) MCP server, adding the headers keymule holds (used in configs). New URLs need your approval once |
 | `keymule ui [--no-open] [--port N]` | Open the local web page (127.0.0.1 only, token in the link it opens) |
-| `keymule init [--dry-run]` | Set up every agent found (see [Agents](#agents)) |
+| `keymule init [--dry-run]` | Set up every agent found (see [Agents](#agents)). The first time, it also offers allow-all for your home folder, with Always preselected |
 | `keymule mcp` | The MCP server (started by your agent) |
 | `keymule hook prompt [--agent claude\|codex\|cursor]` | The paste-to-save prompt hook |
 | `keymule hook bash [--agent claude\|codex\|cursor]` | The guard that stops agents reading tokens back out of git, gh or the keychain |

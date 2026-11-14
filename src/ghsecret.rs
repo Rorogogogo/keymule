@@ -469,13 +469,7 @@ async fn secret_names(up: &Uploader, repo: &str) -> Result<Vec<String>> {
         .unwrap_or_default())
 }
 
-pub fn question(
-    transfers: &[Transfer],
-    hosts: &[String],
-    repo: &str,
-    up: &Uploader,
-    existing: &[String],
-) -> String {
+pub fn question(transfers: &[Transfer], repo: &str, up: &Uploader, existing: &[String]) -> String {
     let n = transfers.len();
     let what = if n == 1 {
         "a secret".to_string()
@@ -486,11 +480,11 @@ pub fn question(
         .iter()
         .map(|t| {
             let replaces = if existing.contains(&t.secret) {
-                "  (replaces the current one)"
+                "  (replaces)"
             } else {
                 ""
             };
-            format!("  {}  ←  {}{replaces}", t.secret, t.cred)
+            format!("        {}  ←  {}{replaces}", t.secret, t.cred)
         })
         .collect();
     let who = match &up.login {
@@ -502,20 +496,9 @@ pub fn question(
     } else {
         ""
     };
-    let kept = if hosts.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " In keymule {} could only go to {}.",
-            if n == 1 { "it" } else { "they" },
-            hosts.join(", ")
-        )
-    };
     format!(
-        "Copy {what} from keymule into {repo}'s GitHub Actions secrets?\n\n{}\n\n\
-         Uploaded {who}{access}, using {}. Each value is encrypted with the repo's key; the \
-         agent never sees it. Any workflow in {repo} can then use {}.{kept}\n\n\
-         keymule doesn't keep these copies in step: after rotating one, run this again.",
+        "Copy {what} into {repo}'s GitHub Actions?\n\n{}\n\n\
+         Uploaded {who}{access}, using {}. Encrypted; the agent never sees {}.",
         lines.join("\n"),
         up.how(),
         if n == 1 { "it" } else { "them" },
@@ -552,9 +535,6 @@ pub async fn push(
         repo,
     )?;
     let existing = secret_names(&up, repo).await.unwrap_or_default();
-    let mut hosts: Vec<String> = sources.iter().flat_map(|s| s.hosts.clone()).collect();
-    hosts.sort();
-    hosts.dedup();
 
     if dry_run {
         let mut out = format!("Would upload with {}\n", up.describe(repo));
@@ -570,7 +550,7 @@ pub async fn push(
         return Ok(out);
     }
 
-    let allowed = confirm(&question(transfers, &hosts, repo, &up, &existing))
+    let allowed = confirm(&question(transfers, repo, &up, &existing))
         .context("keymule needs to ask you first, but can't show a dialog here")?;
     if !allowed {
         bail!("the user didn't allow it; nothing changed");
@@ -866,25 +846,23 @@ mod tests {
         .unwrap();
         let q = question(
             &t,
-            &["oauth2.googleapis.com".into()],
             REPO,
             &up("gh", true, "octo", Access::Admin),
             &["CWS_REFRESH_TOKEN".into()],
         );
         assert!(
-            q.starts_with("Copy 3 secrets from keymule into octo/ext's"),
+            q.starts_with("Copy 3 secrets into octo/ext's GitHub Actions?"),
             "{q}"
         );
-        assert!(q.contains("CWS_CLIENT_ID  ←  cws-id\n"), "{q}");
+        assert!(q.contains("        CWS_CLIENT_ID  ←  cws-id\n"), "{q}");
         assert!(
-            q.contains("CWS_REFRESH_TOKEN  ←  cws-refresh  (replaces the current one)"),
+            q.contains("CWS_REFRESH_TOKEN  ←  cws-refresh  (replaces)"),
             "{q}"
         );
         assert!(
             q.contains("Uploaded as octo (admin there), using your gh login"),
             "{q}"
         );
-        assert!(q.contains("could only go to oauth2.googleapis.com"), "{q}");
         assert!(!q.contains(" t "), "no token in the dialog");
     }
 }

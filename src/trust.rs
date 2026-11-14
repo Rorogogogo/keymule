@@ -38,6 +38,9 @@ pub struct Allowed {
 struct Record {
     #[serde(default)]
     allowed: Vec<Allowed>,
+    /// Setup has offered allow-all once; it doesn't offer again.
+    #[serde(default)]
+    offered: bool,
 }
 
 pub fn now() -> u64 {
@@ -56,7 +59,7 @@ fn load(vault: &dyn Vault) -> Record {
 }
 
 fn save(vault: &dyn Vault, r: &Record) -> Result<()> {
-    if r.allowed.is_empty() {
+    if r.allowed.is_empty() && !r.offered {
         let _ = vault.delete(ITEM);
         return Ok(());
     }
@@ -176,12 +179,9 @@ pub enum Span {
 /// The dialog that turns it on.
 pub fn question(project: &Path) -> String {
     format!(
-        "Allow all for {}?\n\n\
-         Agents working in this folder can then use every keymule credential without a \
-         dialog: with any program (shells and ones they build too), copied into GitHub Actions, \
-         sent to new sites, and shown on screen. Deleting still asks.\n\n\
-         keymule still keeps secrets out of its own output and logs every use, but an agent \
-         that sets out to read a secret will be able to. Turn it off any time: keymule allow --off",
+        "Allow all in {}?\n\n\
+         Agents here can use, and read, any secret without asking you. Deleting still asks. \
+         Undo with keymule allow --off",
         crate::cliexec::tilde(project)
     )
 }
@@ -196,6 +196,26 @@ pub fn ask(vault: &dyn Vault, project: &Path) -> Result<Option<Allowed>> {
         Some(Span::Today) => Some(grant(vault, project, Some(end_of_today(at)), at)?),
         Some(Span::UntilOff) => Some(grant(vault, project, None, at)?),
     })
+}
+
+/// First setup: offer allow-all for `home` once, with Always as the default
+/// answer. Never offers again, whatever the user picked, and never when
+/// it's already on somewhere.
+pub fn offer_once(vault: &dyn Vault, home: &Path) -> Result<Option<Allowed>> {
+    let r = load(vault);
+    if r.offered {
+        return Ok(None);
+    }
+    if let Some(a) = r.allowed.iter().find(|a| a.until.is_none_or(|u| now() < u)) {
+        return Ok(Some(a.clone()));
+    }
+    let got = ask(vault, home)?;
+    // Only once the user has answered: if no dialog could be shown, the
+    // next setup offers again.
+    let mut r = load(vault);
+    r.offered = true;
+    save(vault, &r)?;
+    Ok(got)
 }
 
 /// Local midnight after `at`, or 24 hours on if the time zone is unknown.
@@ -296,10 +316,35 @@ mod tests {
     }
 
     #[test]
+    fn setup_offers_only_once_and_not_when_already_on() {
+        let v = MemVault::default();
+        let home = tempfile::tempdir().unwrap();
+        grant(&v, home.path(), None, now()).unwrap();
+        assert!(
+            offer_once(&v, home.path()).unwrap().is_some(),
+            "already on: reported, no dialog"
+        );
+        revoke(&v, None).unwrap();
+        save(
+            &v,
+            &Record {
+                allowed: vec![],
+                offered: true,
+            },
+        )
+        .unwrap();
+        assert!(
+            offer_once(&v, home.path()).unwrap().is_none(),
+            "offered before"
+        );
+        assert!(v.get(ITEM).is_ok(), "the offered mark is kept");
+    }
+
+    #[test]
     fn the_question_says_what_it_gives_away() {
         let q = question(Path::new("/work/shop"));
-        assert!(q.contains("Allow all for /work/shop?"));
+        assert!(q.contains("Allow all in /work/shop?"));
         assert!(q.contains("Deleting still asks"));
-        assert!(q.contains("will be able to"));
+        assert!(q.contains("and read"));
     }
 }

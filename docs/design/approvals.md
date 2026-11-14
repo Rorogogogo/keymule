@@ -5,8 +5,8 @@ account). The rest is proposed.
 
 ## Decided after review (2026-11-14)
 
-- **Allow all, per project, shipped first.** `keymule allow` shows one dialog (*Don't Allow /
-  Allow for Today / Allow Until I Turn It Off*) for the current git repo. After that, keymule
+- **Allow all, per project, shipped first.** `keymule allow` shows one dialog (*Cancel /
+  Today / Always*) for the current git repo. After that, keymule
   asks nothing there except before deleting: not for programs (agent-built ones included),
   `gh-secret`, git installs, MCP commands and URLs, new hosts, reveals, or saving a pasted
   secret. Shells, interpreters and the read-back guard are let through as well. Exec under allow-all isn't remembered, so `keymule allow --off` brings every
@@ -22,7 +22,7 @@ account). The rest is proposed.
   store.
 - **Codex and Cursor ask with a choice, not a text stop.** Their prompt hooks can only let a
   message through or stop it; neither can swap a secret out of it. So keymule shows a
-  native dialog: *Save in keymule* (default), *Send As Is* (goes straight through) or
+  native dialog: *Save* (default), *Send Anyway* (goes straight through) or
   *Don't Send*. After saving, Codex still needs `y` to send the rest, because the hook
   can't send a changed message for you. Under allow-all, keymule saves without the dialog.
 

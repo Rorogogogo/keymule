@@ -698,7 +698,7 @@ r = kx(*gargs, answer="deny", PATH=nopath)
 check("gh-secret: a no copies nothing", r.returncode != 0 and not puts, r.stderr)
 r = kx(*gargs, answer="allow", PATH=nopath)
 dialogs = open(dlog).read().split("---")[before:]
-asked = [d for d in dialogs if "GitHub Actions secrets" in d]
+asked = [d for d in dialogs if "GitHub Actions?" in d]
 check("gh-secret copies three secrets after one dialog per run",
       r.returncode == 0 and len(asked) == 2 and [n for n, _, _ in puts] ==
       ["CWS_CLIENT_ID", "CWS_CLIENT_SECRET", "CWS_REFRESH_TOKEN"]

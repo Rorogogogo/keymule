@@ -218,8 +218,7 @@ async fn add(a: AddArgs) -> anyhow::Result<String> {
         .map_err(|e| anyhow!("{e}. Ask the user for their username and pass it as `username`."))?;
 
     let secret = ask_secret(format!(
-        "Paste your {} token for \"{name}\".\n\nkeymule will only ever send it to:\n\n        {}\n\n\
-         If you don't recognise that host, click Cancel.",
+        "Paste your {} token for \"{name}\"\n\nIt will only be sent to:\n\n        {}",
         preset.title,
         hosts.join(", ")
     ))
@@ -269,7 +268,7 @@ async fn rotate(a: RotateArgs) -> anyhow::Result<String> {
         cred.hosts.join(", ")
     };
     let secret = ask_secret(format!(
-        "Paste the NEW {title} token for \"{}\".\n\nIt will only ever be sent to:\n\n        {hosts}",
+        "Paste the new {title} token for \"{}\"\n\nIt will only be sent to:\n\n        {hosts}",
         a.name
     ))
     .await?;
@@ -337,9 +336,8 @@ async fn add_mcp_secret(a: McpSecretArgs) -> anyhow::Result<String> {
         .map(|d| format!(" ({d})"))
         .unwrap_or_default();
     let value = ask_secret(format!(
-        "Your agent is setting up an MCP server that needs {}{what}.\n\n\
-         Type the value here. keymule keeps it in the keychain, and only a server you approve \
-         will get it.",
+        "Enter {}{what} for a new MCP server\n\n\
+         Only servers you approve will get it.",
         needs
     ))
     .await?;
@@ -402,11 +400,11 @@ async fn update(a: UpdateArgs) -> anyhow::Result<String> {
             let current = if cred.hosts.is_empty() {
                 String::new()
             } else {
-                format!("Currently it may only go to: {}\n\n", cred.hosts.join(", "))
+                format!("Now it only goes to {}. ", cred.hosts.join(", "))
             };
             let allowed = ask_confirm(format!(
-                "Your agent wants to let the credential \"{}\" be sent to:\n\n        {host}\n\n\
-                 {current}Only allow this if you asked for it.",
+                "Send \"{}\" to a new site?\n\n        {host}\n\n\
+                 {current}Only allow it if you asked for it.",
                 a.name
             ))
             .await?;
