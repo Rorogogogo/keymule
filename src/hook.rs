@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::detect;
 use crate::presets::{self, AuthKind};
-use crate::store::{Auth, Credential, Sealed, Store, Vault, host_of, validate_name};
+use crate::store::{Auth, Credential, Sealed, Store, Vault, validate_name};
 
 /// Put this anywhere in a prompt to send it as-is.
 pub const IGNORE_MARKER: &str = "#keymule-ignore";
@@ -626,11 +626,7 @@ fn save(
     let preset = presets::get_or_generic(found.service.unwrap_or("generic"));
     let name = name.to_string();
     let url = preset.default_url.unwrap_or("").to_string();
-    let hosts = if url.is_empty() {
-        vec![]
-    } else {
-        vec![host_of(&url)?]
-    };
+    let hosts = presets::hosts_for(preset, &url)?;
     let auth = match preset.auth {
         AuthKind::Bearer => Auth::Bearer,
         AuthKind::Basic => Auth::Basic {
@@ -827,7 +823,10 @@ mod tests {
         handle(GH, "s", &mut s, &v, 1);
         let (_, notice) = context(handle("yes", "s", &mut s, &v, 2));
         assert!(!notice.contains("finish setup"));
-        assert_eq!(s.creds["github"].hosts, vec!["api.github.com"]);
+        assert_eq!(
+            s.creds["github"].hosts,
+            vec!["api.github.com", "github.com", "uploads.github.com"]
+        );
     }
 
     #[test]

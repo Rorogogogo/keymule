@@ -31,7 +31,23 @@ types it in a dialog), then configure the server to run `keymule exec <name> [--
 <server command>`. For a remote (HTTP) MCP server that needs an API key header, call \
 add_mcp_secret with `header` instead of `env`, and configure it as a stdio server running \
 `keymule remote <name> <url>`. The user approves that command or URL once, in a dialog, when it \
-first starts.";
+first starts. When a command-line tool needs a stored credential (gh, glab...), run it as \
+`keymule exec <name> --env GH_TOKEN -- gh ...`: the user approves each program and folder once, \
+the secret is hidden from its output, and shells and interpreters are refused. For git over \
+HTTPS, call install_credential (name, host, username) and point the repo's remote at \
+https://<username>@<host>/<owner>/<repo>.git. Never read a token back (git credential fill, \
+gh auth token, security find-*-password -w).";
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct InstallArgs {
+    /// Credential name from list_credentials.
+    pub name: String,
+    /// Git host, e.g. "github.com" (not the API host).
+    pub host: String,
+    /// The account the credential belongs to, as it will appear in the remote URL
+    /// (https://<username>@<host>/...).
+    pub username: String,
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddArgs {
@@ -185,14 +201,15 @@ async fn add(a: AddArgs) -> anyhow::Result<String> {
         })?
         .trim_end_matches('/')
         .to_string();
-    let host = host_of(&url)?;
+    let hosts = presets::hosts_for(preset, &url)?;
     let auth = presets::auth_for(preset, a.header, a.username)
         .map_err(|e| anyhow!("{e}. Ask the user for their username and pass it as `username`."))?;
 
     let secret = ask_secret(format!(
-        "Paste your {} token for \"{name}\".\n\nkeymule will only ever send it to:\n\n        {host}\n\n\
+        "Paste your {} token for \"{name}\".\n\nkeymule will only ever send it to:\n\n        {}\n\n\
          If you don't recognise that host, click Cancel.",
-        preset.title
+        preset.title,
+        hosts.join(", ")
     ))
     .await?;
     let cred = Credential {
@@ -200,7 +217,7 @@ async fn add(a: AddArgs) -> anyhow::Result<String> {
         url,
         description: a.description.unwrap_or_default(),
         auth,
-        hosts: vec![host],
+        hosts,
         added_by: "mcp".into(),
     };
     let note = check(&name, &cred, &secret, a.verify.unwrap_or(true)).await?;
@@ -247,8 +264,20 @@ async fn rotate(a: RotateArgs) -> anyhow::Result<String> {
     let note = check(&a.name, &cred, &secret, a.verify.unwrap_or(true)).await?;
     sealed.secret = secret;
     sealed.save(store::vault().as_ref(), &a.name)?;
+    let synced = tokio::task::spawn_blocking(move || {
+        let notes = crate::install::resync(&sealed);
+        (sealed.installs.len(), notes)
+    })
+    .await?;
+    let copies = match synced {
+        (0, _) => String::new(),
+        (_, notes) if notes.is_empty() => {
+            " Its copy in git's credential store was updated too.".into()
+        }
+        (_, notes) => format!(" {}", notes.join("; ")),
+    };
     Ok(format!(
-        "Rotated \"{}\"{note}. Remind the user to revoke the old token at the service.",
+        "Rotated \"{}\"{note}.{copies} Remind the user to revoke the old token at the service.",
         a.name
     ))
 }
@@ -376,7 +405,7 @@ async fn update(a: UpdateArgs) -> anyhow::Result<String> {
                 );
             }
         }
-        cred.hosts = vec![host];
+        cred.hosts = presets::hosts_for(presets::get_or_generic(&cred.service), &url)?;
         cred.url = url;
         changed.push("url");
     }
@@ -458,6 +487,20 @@ impl Server {
             Ok(s) => s,
             Err(e) => return Ok(tool_error(format!("{e:#}"))),
         };
+        let names: Vec<String> = store.creds.keys().cloned().collect();
+        let sealed: BTreeMap<String, Sealed> = tokio::task::spawn_blocking(move || {
+            let store = Store::load().ok();
+            let vault = store::vault();
+            names
+                .into_iter()
+                .filter_map(|n| {
+                    let c = store.as_ref()?.creds.get(&n)?;
+                    Some((n.clone(), Sealed::load(vault.as_ref(), &n, c).ok()?))
+                })
+                .collect()
+        })
+        .await
+        .unwrap_or_default();
         if store.creds.is_empty() && store.servers.is_empty() {
             return Ok(text(
                 "No credentials stored yet. Use add_credential (services: bamboo, github, gitlab, \
@@ -480,11 +523,25 @@ impl Server {
                         "ask the user for their username, then update_credential(name=\"{name}\", username=...)"
                     ));
                 }
+                let mut how = vec![format!("http_request(credential=\"{name}\", ...)")];
+                let (var, cli) = preset.cli_env.unwrap_or(("VAR", "<command>"));
+                how.push(format!("CLI tools: keymule exec {name} --env {var} -- {cli} ..."));
+                if c.service == "github" || c.service == "gitlab" {
+                    how.push(format!(
+                        "git over HTTPS: install_credential(name=\"{name}\", host=..., username=<account>)"
+                    ));
+                }
+                let installed: Vec<String> = sealed
+                    .get(name)
+                    .map(|s| s.installs.iter().map(|i| i.label()).collect())
+                    .unwrap_or_default();
                 serde_json::json!({
                     "name": name,
                     "service": preset.title,
                     "base_url": c.url,
                     "allowed_hosts": c.hosts,
+                    "how_to_use": how,
+                    "installed": installed,
                     "description": c.description,
                     "auth": c.auth.label(),
                     "api_hint": preset.hint,
@@ -590,6 +647,30 @@ impl Server {
         Parameters(args): Parameters<UpdateArgs>,
     ) -> Result<CallToolResult, McpError> {
         Ok(done(update(args).await))
+    }
+
+    #[tool(
+        description = "Copy a stored credential into git's own credential store (macOS keychain, Git Credential Manager...) so git push/pull over HTTPS works as that account. The user approves in a dialog; you never see the secret. Afterwards point the repo's remote at https://<username>@<host>/<owner>/<repo>.git. keymule keeps the copy updated on rotate and removes it on delete."
+    )]
+    async fn install_credential(
+        &self,
+        Parameters(args): Parameters<InstallArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = tokio::task::spawn_blocking(move || {
+            let store = Store::load()?;
+            crate::install::install(
+                store::vault().as_ref(),
+                &store,
+                &args.name,
+                &args.host,
+                &args.username,
+                &|m| dialog::confirm(m),
+            )
+        })
+        .await
+        .map_err(|e| anyhow!(e.to_string()))
+        .and_then(|r| r);
+        Ok(done(result))
     }
 
     #[tool(

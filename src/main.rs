@@ -1,12 +1,16 @@
 mod adopt;
+mod cliexec;
 mod detect;
 mod dialog;
 mod doctor;
+mod guard;
 mod hook;
 mod http;
 mod init;
+mod install;
 mod mcp;
 mod presets;
+mod redact;
 mod remote;
 mod servers;
 mod store;
@@ -125,15 +129,36 @@ enum Cmd {
         #[arg(long = "server", value_name = "NAME")]
         servers: Vec<String>,
     },
-    /// Start an adopted MCP server with its secrets (used in agent configs).
+    /// Run a command with a secret: an adopted MCP server (used in agent
+    /// configs), or a CLI tool with a stored credential in an env var
+    /// (`keymule exec github --env GH_TOKEN -- gh pr create …`).
     Exec {
         name: String,
-        /// Put the secret into this env var instead (for a single-value secret).
+        /// The env var to put the secret in (a credential: defaults to the
+        /// service's, e.g. GH_TOKEN; an MCP server: renames its one value).
         #[arg(long = "env", value_name = "VAR")]
         rename: Vec<String>,
-        /// The server's command, exactly as adopted.
+        /// The command to run.
         #[arg(last = true, required = true)]
         command: Vec<String>,
+    },
+    /// Copy a credential into git's credential store so git uses it for
+    /// https://<host> as <username> (asks you first).
+    Install {
+        name: String,
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        username: String,
+    },
+    /// Remove a credential's copies from git's credential store (keeps it
+    /// in keymule).
+    Uninstall {
+        name: String,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        username: Option<String>,
     },
     /// Connect to a remote (HTTP) MCP server, adding the headers keymule
     /// holds (used in agent configs, as a stdio server).
@@ -174,6 +199,13 @@ enum HookKind {
     /// The prompt hook (Claude Code, Codex, Cursor): hold a prompt with a
     /// secret and ask.
     Prompt {
+        /// Which agent runs it.
+        #[arg(long, value_enum, default_value_t)]
+        agent: hook::Agent,
+    },
+    /// Before an agent runs a shell command: block reading tokens back out
+    /// of git's, gh's or the keychain's stores.
+    Bash {
         /// Which agent runs it.
         #[arg(long, value_enum, default_value_t)]
         agent: hook::Agent,
@@ -288,7 +320,51 @@ async fn run(cli: Cli) -> Result<()> {
             name,
             rename,
             command,
-        } => servers::exec(store::vault().as_ref(), &name, &rename, &command),
+        } => {
+            if Store::load()?.creds.contains_key(&name) {
+                cliexec::run(store::vault().as_ref(), &name, &rename, &command)
+            } else {
+                servers::exec(store::vault().as_ref(), &name, &rename, &command)
+            }
+        }
+        Cmd::Install {
+            name,
+            host,
+            username,
+        } => {
+            let store = Store::load()?;
+            let msg = install::install(
+                store::vault().as_ref(),
+                &store,
+                &name,
+                &host,
+                &username,
+                &|m| dialog::confirm(m),
+            )?;
+            println!("{msg}");
+            Ok(())
+        }
+        Cmd::Uninstall {
+            name,
+            host,
+            username,
+        } => {
+            let store = Store::load()?;
+            let gone = install::uninstall(
+                store::vault().as_ref(),
+                &store,
+                &name,
+                host.as_deref(),
+                username.as_deref(),
+            )?;
+            if gone.is_empty() {
+                println!("\"{name}\" had no matching copy in git's credential store.");
+            }
+            for i in gone {
+                println!("Removed {} (still in keymule as \"{name}\").", i.label());
+            }
+            Ok(())
+        }
         Cmd::Ui { no_open, port } => ui::run(!no_open, port),
         Cmd::Remote { name, url, headers } => {
             remote::run(store::vault().as_ref(), &name, &headers, &url).await
@@ -302,6 +378,16 @@ async fn run(cli: Cli) -> Result<()> {
             std::io::stdin().read_to_string(&mut input)?;
             let mut store = Store::load()?;
             if let Some(out) = hook::run_as(agent, &input, &mut store, store::vault().as_ref()) {
+                println!("{out}");
+            }
+            Ok(())
+        }
+        Cmd::Hook {
+            kind: HookKind::Bash { agent },
+        } => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            if let Some(out) = guard::run(agent, &input) {
                 println!("{out}");
             }
             Ok(())
@@ -377,12 +463,13 @@ async fn add(
     let auth = presets::auth_for(preset, header, username)?;
 
     let secret = tty::secret(&format!("{} token/password (hidden): ", preset.title))?;
+    let hosts = presets::hosts_for(preset, &url)?;
     let cred = Credential {
         service: preset.id.into(),
         url,
         description: description.unwrap_or_default(),
         auth,
-        hosts: vec![host.clone()],
+        hosts,
         added_by: "cli".into(),
     };
 
@@ -474,6 +561,8 @@ fn list_json() -> Result<()> {
                 "description": c.description,
                 "added_by": c.added_by,
                 "file_edited": sealed.as_ref().is_some_and(|s| s.differs_from(c)),
+                "installed": sealed.as_ref().map(|s| s.installs.iter().map(|i| i.label()).collect::<Vec<_>>()).unwrap_or_default(),
+                "exec_allowed": sealed.as_ref().map(|s| s.exec_grants.iter().map(|g| format!("{} in {}", g.program, g.dir)).collect::<Vec<_>>()).unwrap_or_default(),
                 "missing_secret": sealed.is_none(),
             })
         })
@@ -532,7 +621,7 @@ fn edit(
             // agent would try, so a human has to approve it on the terminal.
             tty::confirm(&format!("Allow \"{name}\" to be sent to {host}?"))?;
         }
-        cred.hosts = vec![host];
+        cred.hosts = presets::hosts_for(presets::get_or_generic(&cred.service), &u)?;
         cred.url = u;
     }
     if let Some(u) = username {
@@ -580,6 +669,12 @@ async fn rotate(name: &str, no_verify: bool, dialog: bool) -> Result<()> {
     }
     sealed.secret = secret;
     sealed.save(vault.as_ref(), name)?;
+    for note in install::resync(&sealed) {
+        eprintln!("! {note}");
+    }
+    if !sealed.installs.is_empty() {
+        println!("Updated its copy in git's credential store too.");
+    }
     println!("Rotated \"{name}\". Revoke the old token at the service if you haven't.");
     Ok(())
 }
@@ -793,12 +888,30 @@ fn rm(name: &str, dialog: bool) -> Result<()> {
         println!("Deleted \"{name}\".");
         return Ok(());
     }
-    store.get(name)?;
+    let cred = store.get(name)?.clone();
+    let vault = store::vault();
+    let installs = Sealed::load(vault.as_ref(), name, &cred)
+        .map(|s| s.installs.clone())
+        .unwrap_or_default();
+    let also = if installs.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = installs.iter().map(|i| i.label()).collect();
+        format!(
+            " Its copy in git's credential store ({}) goes too.",
+            list.join(", ")
+        )
+    };
     confirm_rm(
-        &format!("Delete \"{name}\" and its secret? Agents using it will stop working."),
+        &format!("Delete \"{name}\" and its secret? Agents using it will stop working.{also}"),
         dialog,
     )?;
-    store::vault().delete(name)?;
+    if let Ok(sealed) = Sealed::load(vault.as_ref(), name, &cred) {
+        for note in install::erase_all(&sealed) {
+            eprintln!("! {note}");
+        }
+    }
+    vault.delete(name)?;
     store.creds.remove(name);
     store.save()?;
     println!("Deleted \"{name}\".");

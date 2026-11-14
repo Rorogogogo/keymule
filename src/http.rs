@@ -13,7 +13,6 @@ use reqwest::{Method, StatusCode, Url};
 use crate::presets;
 use crate::store::{Auth, Credential, config_dir, host_of};
 
-pub const REDACTED: &str = "[redacted by keymule]";
 const MAX_REDIRECTS: usize = 5;
 const HARD_BODY_CAP: usize = 20 * 1024 * 1024;
 
@@ -262,11 +261,9 @@ pub async fn verify(name: &str, cred: &Credential, secret: &str) -> Result<Optio
     Ok(Some(who.unwrap_or_else(|| "ok".into())))
 }
 
+/// `text` with `secret` taken out, also URL-encoded or base64.
 pub fn redact(text: &str, secret: &str) -> String {
-    if secret.len() < 4 {
-        return text.to_string();
-    }
-    text.replace(secret, REDACTED)
+    crate::redact::scrub(text, secret)
 }
 
 fn clip(text: &str, max_bytes: usize, keep_tail: bool) -> (String, bool) {
@@ -310,6 +307,7 @@ pub fn audit(name: &str, method: &str, url: &str, status: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redact::REDACTED;
 
     fn cred(url: &str) -> Credential {
         Credential {

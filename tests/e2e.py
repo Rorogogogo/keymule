@@ -525,5 +525,91 @@ check("ui won't pass a flag as a name to reveal",
 check("ui won't pass a flag as a name", '"bad name"' in body, body)
 u.terminate()
 
+# ---- keymule exec with a stored credential (gh-style CLI tools) ---------------
+tools = tempfile.mkdtemp()
+faketool = os.path.join(tools, "faketool")       # a real binary that prints an env var
+with open(os.path.join(tools, "faketool.c"), "w") as f:
+    f.write('#include <stdio.h>\n#include <stdlib.h>\nint main(int c, char **v) '
+            '{ const char *s = getenv(v[1]); if (!s) return 3; printf("token=%s\\n", s); return 0; }\n')
+subprocess.run(["cc", "-o", faketool, os.path.join(tools, "faketool.c")], check=True)
+xenv = dict(env, KEYMULE_TEST_DIALOG_LOG=os.path.join(home, "xdialog.log"))
+
+
+def kx(*args, answer="deny", **kw):
+    return subprocess.run([BIN, *args], env=dict(xenv, KEYMULE_TEST_DIALOG=answer, **kw),
+                          capture_output=True, text=True, timeout=30, cwd=tools)
+
+
+r = kx("exec", "bamboo", "--env", "BAMBOO_TOKEN", "--", faketool, "BAMBOO_TOKEN", answer="deny")
+check("exec asks first, and a no means it doesn't run", r.returncode != 0 and "didn't allow" in r.stderr, r.stderr)
+r = kx("exec", "bamboo", "--env", "BAMBOO_TOKEN", "--", faketool, "BAMBOO_TOKEN", answer="allow")
+check("exec hands the secret over, scrubbed from output",
+      r.returncode == 0 and SECRET not in r.stdout + r.stderr and "[redacted by keymule]" in r.stdout,
+      r.stdout + r.stderr)
+r = kx("exec", "bamboo", "--env", "BAMBOO_TOKEN", "--", faketool, "BAMBOO_TOKEN", answer="deny")
+check("exec doesn't ask again for the same program and folder", r.returncode == 0, r.stderr)
+for cmd in (["sh", "-c", "echo $X"], ["env"], ["python3", "-c", "print(1)"]):
+    r = kx("exec", "bamboo", "--env", "X", "--", *cmd, answer="allow")
+    check(f"exec refuses {cmd[0]}", r.returncode != 0 and "won't hand a credential" in r.stderr, r.stderr)
+script = os.path.join(tools, "sneaky")
+with open(script, "w") as f:
+    f.write("#!/bin/sh\nprintenv X\n")
+os.chmod(script, 0o755)
+r = kx("exec", "bamboo", "--env", "X", "--", script, answer="allow")
+check("exec refuses a script run by a shell", r.returncode != 0 and "script run by `sh`" in r.stderr, r.stderr)
+with open(os.path.join(home, "audit.log")) as f:
+    log = f.read()
+check("exec runs are in the activity log, without the secret", "\tEXEC\t" in log and SECRET not in log)
+
+# ---- install into git's credential store (a throwaway git config) -------------
+gitdir = tempfile.mkdtemp()
+store_file = os.path.join(gitdir, "creds")
+with open(os.path.join(gitdir, "gitconfig"), "w") as f:
+    f.write(f"[credential]\n\thelper = store --file {store_file}\n")
+genv = dict(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.path.join(gitdir, "gitconfig"))
+
+
+def git_fill(host, user):
+    r = subprocess.run(["git", "credential", "fill"], input=f"protocol=https\nhost={host}\nusername={user}\n\n",
+                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="/usr/bin/false", **genv),
+                       capture_output=True, text=True, timeout=10)
+    return dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l).get("password")
+
+
+r = kx("install", "bamboo", "--host", "git.example.com", "--username", "acme-bot", answer="deny", **genv)
+check("install asks first", r.returncode != 0 and git_fill("git.example.com", "acme-bot") is None, r.stderr)
+r = kx("install", "bamboo", "--host", "git.example.com", "--username", "acme-bot", answer="allow", **genv)
+check("install puts it in git's store, never in its output",
+      r.returncode == 0 and git_fill("git.example.com", "acme-bot") == SECRET and SECRET not in r.stdout + r.stderr,
+      r.stdout + r.stderr)
+check("install hints at the remote URL", "https://acme-bot@git.example.com/" in r.stdout, r.stdout)
+r = kx("list", "--json", **genv)
+check("list shows the git copy", "git · acme-bot@git.example.com" in r.stdout and SECRET not in r.stdout, r.stdout)
+r = kx("rotate", "bamboo", "--dialog", "--no-verify", answer="rotated-token-0042xyz", **genv)
+check("rotate updates the git copy", r.returncode == 0 and git_fill("git.example.com", "acme-bot") == "rotated-token-0042xyz",
+      r.stdout + r.stderr)
+r = kx("uninstall", "bamboo", **genv)
+check("uninstall erases the git copy and keeps the credential",
+      r.returncode == 0 and git_fill("git.example.com", "acme-bot") is None
+      and "bamboo" in kx("list", "--json", **genv).stdout, r.stdout + r.stderr)
+kx("install", "bamboo", "--host", "git.example.com", "--username", "acme-bot", answer="allow", **genv)
+r = kx("rm", "bamboo", "--dialog", answer="allow", **genv)
+check("rm erases the git copy too", r.returncode == 0 and git_fill("git.example.com", "acme-bot") is None,
+      r.stdout + r.stderr)
+
+# ---- the read-back guard -------------------------------------------------------
+def guard(command, agent="claude"):
+    r = subprocess.run([BIN, "hook", "bash", "--agent", agent],
+                       input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                       env=env, capture_output=True, text=True, timeout=10)
+    return json.loads(r.stdout) if r.stdout.strip() else None
+
+
+j = guard("printf 'host=github.com\\n\\n' | git credential fill")
+check("guard blocks git credential fill",
+      j and j["hookSpecificOutput"]["permissionDecision"] == "deny", j)
+check("guard blocks gh auth token (Codex)", (guard("gh auth token", "codex") or {}).get("decision") == "block")
+check("guard lets git push through", guard("git push origin main") is None)
+
 print(f"\n{'ALL PASSED' if not fails else f'{fails} FAILED'}")
 sys.exit(1 if fails else 0)

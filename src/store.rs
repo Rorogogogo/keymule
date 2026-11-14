@@ -188,6 +188,35 @@ pub struct Sealed {
     pub secret: String,
     pub hosts: Vec<String>,
     pub auth: Auth,
+    /// Programs (and the folder) the user let `keymule exec` hand it to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exec_grants: Vec<ExecGrant>,
+    /// Copies the user put in git's credential store (`keymule install`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub installs: Vec<Install>,
+}
+
+/// One program in one folder that may get a credential via `keymule exec`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecGrant {
+    /// Absolute path, symlinks resolved.
+    pub program: String,
+    /// Absolute path of the working directory.
+    pub dir: String,
+}
+
+/// A copy of a credential in git's credential store, for https://<host>
+/// as <username>.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Install {
+    pub host: String,
+    pub username: String,
+}
+
+impl Install {
+    pub fn label(&self) -> String {
+        format!("git · {}@{}", self.username, self.host)
+    }
 }
 
 impl Sealed {
@@ -196,6 +225,8 @@ impl Sealed {
             secret: secret.into(),
             hosts: cred.hosts.clone(),
             auth: cred.auth.clone(),
+            exec_grants: vec![],
+            installs: vec![],
         }
     }
 

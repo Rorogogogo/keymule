@@ -301,7 +301,7 @@ function renderCreds(creds) {
       ico('key'),
       h('span', { class: 'body' },
         h('span', { class: 'title' }, c.name),
-        h('span', { class: 'sub', title: c.description || null }, join([c.description || c.service, (c.hosts || []).join(', '), c.auth]))),
+        h('span', { class: 'sub', title: c.description || null }, join([c.description || c.service, (c.hosts || []).join(', '), c.auth, ...(c.installed || []).map(i => `copied to ${i}`)]))),
       h('span', { class: 'acc' }, status, revealButton(c.name), rotateButton(c.name), deleteButton(c.name)))
   })
 }
@@ -326,7 +326,7 @@ function renderStats() {
   const list = state.list
   if (!list) return []
   const today = new Date().toDateString()
-  const reqs = state.audit.filter(a => a.method !== 'START' && a.method !== 'REVEAL' && new Date(a.ts * 1000).toDateString() === today)
+  const reqs = state.audit.filter(a => !EVENTS[a.method] && a.method !== 'REVEAL' && new Date(a.ts * 1000).toDateString() === today)
   const failed = reqs.filter(a => !(a.status >= 200 && a.status < 300)).length
   const n = list.credentials.length + list.servers.length
   const stat = (k, v, cls) => h('div', { class: 'stat' }, h('span', { class: 'k' }, k), h('span', { class: `v ${cls || ''}` }, v))
@@ -387,19 +387,22 @@ function renderLeaks() {
   return [counts, ...rows]
 }
 
+// Audit lines that aren't HTTP requests: what to call them.
+const EVENTS = { START: 'Started', EXEC: 'Ran', INSTALL: 'Copied to git', UNINSTALL: 'Removed from git' }
+
 function renderActivity() {
   const f = state.filter
   $('filter').replaceChildren(f ? h('button', { class: 'chip', type: 'button', onclick: () => toggleFilter(f), title: 'Show everything' }, f, ' ×') : '')
   const all = state.audit.filter(a => !f || a.name === f).slice(-150).reverse()
   if (!all.length) return [h('div', { class: 'empty' }, f ? `Nothing from ${f} yet.` : 'Requests and server starts show up here as they happen.')]
   const rows = (state.showAllAct || state.view === 'activity' ? all : all.slice(0, 8)).map(a => {
-    const start = a.method === 'START'
+    const event = EVENTS[a.method]
     const shown = a.method === 'REVEAL'
     const ok = a.status >= 200 && a.status < 300
     return h('div', { class: 'act' },
       h('span', { class: 'name', onclick: () => toggleFilter(a.name), title: 'Show only its activity' }, a.name),
       h('span', { class: 'req', title: a.url }, h('span', { class: 'm' }, a.method), h('span', { class: 'u' }, shown ? 'shown to you in a keymule window' : a.url)),
-      h('span', { class: 'st' }, start ? badge('Started') : shown ? badge('Revealed', 'warn') : badge(a.status || '—', ok ? 'ok' : 'bad')),
+      h('span', { class: 'st' }, event ? badge(event) : shown ? badge('Revealed', 'warn') : badge(a.status || '—', ok ? 'ok' : 'bad')),
       h('span', { class: 'when' }, when(a.ts)))
   })
   if (all.length > rows.length) rows.push(h('button', { class: 'more', type: 'button', onclick: () => { state.showAllAct = true; render() } }, `Show ${all.length - rows.length} more`))
