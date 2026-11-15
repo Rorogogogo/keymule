@@ -349,3 +349,58 @@ pre.plan {
 /* On a single-section page the page title already names the section. */
 .main:not(.v-overview) .sh h2, .main:not(.v-overview) .sh .count { display: none; }
 .main:not(.v-overview) .sh:not(:has(button:not([hidden]))) { min-height: 0; padding-bottom: 0; }
+
+/* ---- questions keymule asks in the page ---------------------------------- */
+.pairing {
+  display: grid; grid-template-columns: 1fr auto; gap: 12px 20px; align-items: center;
+  margin-bottom: 28px; padding: 16px 18px; border-radius: 10px;
+  background: var(--accent-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.pairtext { display: grid; gap: 2px; font-size: 13px; color: var(--ink2); }
+.pairtext strong { color: var(--ink); font-size: 14px; font-weight: 600; }
+.pairgo { display: flex; gap: 8px; }
+.paircode { width: 110px; font-family: var(--mono); text-align: center; letter-spacing: 0.06em; }
+.pairing .askerr { grid-column: 1 / -1; margin: 0; }
+@media (max-width: 640px) { .pairing { grid-template-columns: 1fr; } }
+
+.askwrap {
+  position: fixed; inset: 0; z-index: 50; display: grid; place-items: start center;
+  padding: 12vh 16px 16px; background: rgb(26 31 54 / 0.28);
+}
+.askwrap[hidden] { display: none; }
+.ask {
+  width: min(460px, 100%); border-radius: 12px; overflow: hidden;
+  background: var(--panel); box-shadow: var(--shadow-lg);
+}
+.askbrand {
+  display: flex; align-items: center; gap: 8px; padding: 14px 20px 0;
+  font-size: 11.5px; font-weight: 500; color: var(--ink3); letter-spacing: 0.01em;
+}
+.askmore { margin-left: auto; }
+.askmain { display: flex; gap: 14px; padding: 14px 20px 20px; }
+.askicon {
+  flex: none; width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center;
+  background: var(--accent-soft); color: var(--accent);
+}
+.askicon svg { width: 20px; height: 20px; }
+.ask.warn .askicon { background: var(--warn-bg); color: var(--warn); }
+.ask.bad .askicon { background: var(--bad-bg); color: var(--bad); }
+.asktext { min-width: 0; flex: 1; font-size: 13px; line-height: 1.5; color: var(--ink2); }
+.asktext h2 { margin: 0 0 6px; font-size: 14.5px; line-height: 1.4; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.asktext p { margin: 0 0 8px; overflow-wrap: anywhere; }
+.asklabel { font-size: 12px; font-weight: 500; color: var(--ink3); margin-bottom: 4px !important; }
+.askcode {
+  margin: 2px 0 10px; padding: 8px 10px; font: 12px/1.5 var(--mono); color: var(--ink);
+  background: var(--subtle); border: 1px solid var(--line); border-radius: 6px;
+  white-space: pre-wrap; word-break: break-all;
+}
+.asktext > :last-child { margin-bottom: 0; }
+.askval { display: block; width: 100%; margin-top: 12px; font-family: var(--mono); }
+.askerr { color: var(--bad); font-size: 12.5px; margin-top: 10px !important; }
+.askfoot {
+  display: flex; justify-content: flex-end; align-items: center; gap: 8px;
+  padding: 12px 20px; background: var(--subtle); border-top: 1px solid var(--line);
+}
+.askfoot .grow { flex: 1; }
+.btn.danger-fill { background: var(--bad); border-color: var(--bad); color: #fff; }
+.btn.danger-fill:hover { background: color-mix(in srgb, var(--bad) 88%, #000); }

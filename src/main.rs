@@ -1,4 +1,5 @@
 mod adopt;
+mod approvals;
 mod cliexec;
 mod detect;
 mod dialog;
@@ -225,8 +226,8 @@ enum Cmd {
         /// Print the address instead of opening a browser.
         #[arg(long)]
         no_open: bool,
-        /// Port on 127.0.0.1 (default: any free one).
-        #[arg(long, default_value_t = 0)]
+        /// Port on 127.0.0.1 (another free one if it's taken).
+        #[arg(long, default_value_t = ui::DEFAULT_PORT)]
         port: u16,
     },
     /// keymule in the macOS menu bar: its page in its own window, no browser.

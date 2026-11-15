@@ -29,12 +29,19 @@ struct Ctx {
     port: u16,
     token: String,
     exe: std::path::PathBuf,
+    /// Pairs the first browser for page approvals; printed in the terminal
+    /// that ran `keymule ui`.
+    code: String,
 }
+
+/// The page's usual port. A fixed address matters: a browser keeps its
+/// pairing key per address, so a new port each run would lose it.
+pub const DEFAULT_PORT: u16 = 7420;
 
 pub fn run(open: bool, port: u16) -> Result<()> {
     // The menu-bar app already serves the page: show its window instead.
     #[cfg(target_os = "macos")]
-    if open && port == 0 && crate::menubar::open_running() {
+    if open && port == DEFAULT_PORT && crate::menubar::open_running() {
         println!("Opened keymule's window (from the menu bar app).");
         return Ok(());
     }
@@ -43,6 +50,13 @@ pub fn run(open: bool, port: u16) -> Result<()> {
     println!(
         "keymule ui is running at {url}\nOnly this machine can reach it. Press Ctrl-C to stop."
     );
+    if crate::dialog::page_mode() {
+        println!(
+            "Questions from keymule wait in this page. To answer them, click \"Pair this \
+             browser\" there and enter: {}",
+            ctx.code
+        );
+    }
     if open {
         let _ = std::process::Command::new("open").arg(&url).status();
     }
@@ -54,7 +68,7 @@ pub fn run(open: bool, port: u16) -> Result<()> {
 /// (with its token). Used by the macOS menu-bar app.
 #[cfg(target_os = "macos")]
 pub fn start() -> Result<String> {
-    let (listener, ctx) = bind(0)?;
+    let (listener, ctx) = bind(DEFAULT_PORT)?;
     let url = ctx.url();
     std::thread::spawn(move || serve(listener, ctx));
     Ok(url)
@@ -65,10 +79,13 @@ fn bind(port: u16) -> Result<(TcpListener, Arc<Ctx>)> {
         .or_else(|_| TcpListener::bind(("127.0.0.1", 0)))
         .context("can't listen on 127.0.0.1")?;
     let port = listener.local_addr()?.port();
+    let t = random_token()?;
+    let n = u32::from_str_radix(&t[..8], 16).unwrap_or(0) % 1_000_000;
     let ctx = Arc::new(Ctx {
         port,
         token: random_token()?,
         exe: std::env::current_exe()?,
+        code: format!("{:03}-{:03}", n / 1000, n % 1000),
     });
     Ok((listener, ctx))
 }
@@ -251,6 +268,54 @@ fn api(ctx: &Ctx, method: &str, path: &str, body: &[u8]) -> Value {
             })
         }
         ("GET", "/api/audit") => json!({"audit": audit_tail()}),
+        ("GET", "/api/approvals") => {
+            let vault = crate::store::vault();
+            let devices: Vec<Value> = crate::approvals::devices(vault.as_ref())
+                .iter()
+                .map(|d| json!({"id": d.id, "name": d.name, "added": d.added}))
+                .collect();
+            json!({
+                "page_mode": crate::dialog::page_mode(),
+                "pending": crate::approvals::pending(),
+                "devices": devices,
+            })
+        }
+        ("POST", "/api/approvals/answer") => {
+            let reply: Result<crate::approvals::Reply, _> =
+                serde_json::from_value(body.get("reply").cloned().unwrap_or(Value::Null));
+            let Ok(reply) = reply else {
+                return json!({"ok": false, "stderr": "bad answer"});
+            };
+            let vault = crate::store::vault();
+            match crate::approvals::answer(vault.as_ref(), field("id"), &reply) {
+                Ok(()) => json!({"ok": true}),
+                Err(e) => json!({"ok": false, "stderr": e.to_string()}),
+            }
+        }
+        ("POST", "/api/pair") => pair(ctx, field("name"), field("key"), field("code")),
+        ("POST", "/api/unpair") => {
+            let id = field("id").to_string();
+            let vault = crate::store::vault();
+            let Some(d) = crate::approvals::devices(vault.as_ref())
+                .into_iter()
+                .find(|d| d.id == id)
+            else {
+                return json!({"ok": false, "stderr": "no such browser"});
+            };
+            // Unpairing needs a yes too: otherwise anything could unpair
+            // your browser and pair its own as the first one.
+            match crate::dialog::confirm(&format!(
+                "Unpair \"{}\"?\n\nIt won't be able to answer keymule's questions any more.",
+                d.name
+            )) {
+                Ok(true) => match crate::approvals::remove_device(vault.as_ref(), &id) {
+                    Ok(_) => json!({"ok": true}),
+                    Err(e) => json!({"ok": false, "stderr": e.to_string()}),
+                },
+                Ok(false) => json!({"ok": false, "stderr": "not unpaired"}),
+                Err(e) => json!({"ok": false, "stderr": e.to_string()}),
+            }
+        }
         ("POST", "/api/plan") => keymule(ctx, &["adopt", "--dry-run"]),
         ("POST", "/api/adopt") => keymule(ctx, &["adopt", "--yes"]),
         ("POST", "/api/doctor") => {
@@ -331,6 +396,61 @@ fn audit_tail() -> Value {
         })
         .collect();
     Value::Array(rows)
+}
+
+/// Pair a browser for page approvals. The first one needs the code printed
+/// by `keymule ui` (or, on a Mac, a yes in a dialog); after that, a browser
+/// that's already paired has to allow each new one.
+fn pair(ctx: &Ctx, name: &str, key: &str, code: &str) -> Value {
+    let vault = crate::store::vault();
+    let device = match crate::approvals::new_device(name, key) {
+        Ok(d) => d,
+        Err(e) => return json!({"ok": false, "stderr": e.to_string()}),
+    };
+    let known = crate::approvals::devices(vault.as_ref());
+    if known.iter().any(|d| d.id == device.id) {
+        return json!({"ok": true, "id": device.id});
+    }
+    let allowed = if known.is_empty() {
+        let code = code.replace([' ', '-'], "");
+        if !code.is_empty() {
+            same(code.as_bytes(), ctx.code.replace('-', "").as_bytes())
+        } else {
+            first_pair_on_screen(&device.name)
+        }
+    } else {
+        matches!(
+            crate::dialog::confirm(&format!(
+                "Let \"{}\" answer keymule's questions?\n\nA new browser wants to pair. It \
+                 could then approve anything keymule asks.",
+                device.name
+            )),
+            Ok(true)
+        )
+    };
+    if !allowed {
+        return json!({"ok": false, "stderr": if known.is_empty() {
+            "that code doesn't match the one `keymule ui` printed"
+        } else {
+            "a paired browser didn't allow it"
+        }});
+    }
+    let id = device.id.clone();
+    match crate::approvals::add_device(vault.as_ref(), device) {
+        Ok(()) => {
+            crate::http::audit("-", "PAIR", &id, 0);
+            json!({"ok": true, "id": id})
+        }
+        Err(e) => json!({"ok": false, "stderr": e.to_string()}),
+    }
+}
+
+/// On a Mac, the first browser can be paired with a yes in a dialog.
+fn first_pair_on_screen(name: &str) -> bool {
+    crate::dialog::confirm_on_screen(&format!(
+        "Pair \"{name}\" with keymule?\n\nIt will be able to answer keymule's questions in the page."
+    ))
+    .unwrap_or(false)
 }
 
 #[cfg(test)]

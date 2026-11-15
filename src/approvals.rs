@@ -1,0 +1,413 @@
+//! Approvals in the keymule page, for machines without a screen keymule can
+//! pop a dialog on (Linux, a dev container), or a Mac with
+//! `KEYMULE_APPROVALS=page`.
+//!
+//! A question waits as a file in keymule's config folder; the page (`keymule
+//! ui`, opened in a browser, port-forwarded from a container if need be)
+//! lists it, and the user answers there. An answer only counts when it's
+//! signed by a paired browser: each browser makes a key pair that never
+//! leaves it (WebCrypto, not extractable), and its public half is sealed in
+//! the vault when it's paired. Something that can write files or call the
+//! page's server, an agent included, still can't sign as that browser.
+//!
+//! A secret typed into the page is encrypted to a one-off key of the keymule
+//! process that asked (P-256 ECDH, then AES-256-GCM), so it never sits in a
+//! file in the clear.
+//!
+//! Limits, said plainly: on a machine where the vault's key is in reach of
+//! the agent (a passphrase in the environment), an agent that sets out to
+//! decrypt the vault itself can. This guards keymule's own paths.
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, anyhow, bail};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+
+use crate::dialog::{Picked, Spec};
+use crate::store::Vault;
+
+/// The vault item with the paired browsers' public keys.
+const DEVICES: &str = "approve:devices";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Device {
+    pub id: String,
+    pub name: String,
+    /// Public key, SEC1 uncompressed, base64.
+    pub key: String,
+    pub added: u64,
+}
+
+pub fn devices(vault: &dyn Vault) -> Vec<Device> {
+    vault
+        .get(DEVICES)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_devices(vault: &dyn Vault, list: &[Device]) -> Result<()> {
+    if list.is_empty() {
+        let _ = vault.delete(DEVICES);
+        return Ok(());
+    }
+    vault.set(DEVICES, &serde_json::to_string(list)?)
+}
+
+/// Check a browser's public key and make its device record.
+pub fn new_device(name: &str, key: &str) -> Result<Device> {
+    let bytes = B64.decode(key).context("the key isn't base64")?;
+    p256::ecdsa::VerifyingKey::from_sec1_bytes(&bytes).map_err(|_| anyhow!("not a P-256 key"))?;
+    let name: String = name.chars().filter(|c| !c.is_control()).take(60).collect();
+    Ok(Device {
+        id: hex(&Sha256::digest(&bytes)[..8]),
+        name: if name.trim().is_empty() {
+            "Browser".into()
+        } else {
+            name.trim().into()
+        },
+        key: key.into(),
+        added: crate::trust::now(),
+    })
+}
+
+pub fn add_device(vault: &dyn Vault, d: Device) -> Result<()> {
+    let mut list = devices(vault);
+    list.retain(|x| x.id != d.id);
+    list.push(d);
+    save_devices(vault, &list)
+}
+
+pub fn remove_device(vault: &dyn Vault, id: &str) -> Result<bool> {
+    let mut list = devices(vault);
+    let before = list.len();
+    list.retain(|x| x.id != id);
+    save_devices(vault, &list)?;
+    Ok(list.len() != before)
+}
+
+/// Where questions wait.
+fn dir() -> Result<PathBuf> {
+    let d = crate::store::config_dir()?.join("approvals");
+    std::fs::create_dir_all(&d)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(d)
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn random_id() -> Result<String> {
+    let mut b = [0u8; 12];
+    getrandom::fill(&mut b).map_err(|e| anyhow!("no randomness: {e}"))?;
+    Ok(hex(&b))
+}
+
+fn is_id(s: &str) -> bool {
+    s.len() == 24 && s.bytes().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Write a file whole, so a reader never sees half of it.
+fn write_atomic(path: &std::path::Path, text: &str) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// A typed secret, encrypted to the asking process's one-off key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SealedSecret {
+    /// The browser's one-off ECDH public key, SEC1, base64.
+    pub epk: String,
+    pub iv: String,
+    pub ct: String,
+}
+
+/// An answer from the page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reply {
+    pub button: String,
+    pub device: String,
+    /// ECDSA P-256 / SHA-256 over [`message`], raw r‖s, base64.
+    pub sig: String,
+    #[serde(default)]
+    pub secret: Option<SealedSecret>,
+}
+
+/// What a browser signs: the question exactly as written, and its answer.
+pub fn message(id: &str, request: &str, button: &str, secret: Option<&SealedSecret>) -> String {
+    let req = hex(&Sha256::digest(request.as_bytes()));
+    let sec = secret
+        .map(|s| hex(&Sha256::digest(format!("{}.{}.{}", s.epk, s.iv, s.ct))))
+        .unwrap_or_default();
+    format!("keymule-approval-v1\n{id}\n{req}\n{button}\n{sec}")
+}
+
+/// Check the answer is signed by a paired browser.
+pub fn verify(devices: &[Device], id: &str, request: &str, reply: &Reply) -> Result<()> {
+    use p256::ecdsa::signature::Verifier;
+    let d = devices
+        .iter()
+        .find(|d| d.id == reply.device)
+        .ok_or_else(|| anyhow!("that browser isn't paired"))?;
+    let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(&B64.decode(&d.key)?)
+        .map_err(|_| anyhow!("bad stored key"))?;
+    let sig = p256::ecdsa::Signature::from_slice(&B64.decode(&reply.sig)?)
+        .map_err(|_| anyhow!("bad signature"))?;
+    key.verify(
+        message(id, request, &reply.button, reply.secret.as_ref()).as_bytes(),
+        &sig,
+    )
+    .map_err(|_| anyhow!("the signature doesn't match"))
+}
+
+/// The AES key both sides derive from the ECDH secret.
+fn aes_key(id: &str, shared: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(format!("keymule-secret-v1\n{id}\n").as_bytes());
+    h.update(shared);
+    h.finalize().into()
+}
+
+fn open_secret(sk: &p256::SecretKey, id: &str, s: &SealedSecret) -> Result<String> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    let epk = p256::PublicKey::from_sec1_bytes(&B64.decode(&s.epk)?)
+        .map_err(|_| anyhow!("bad key from the page"))?;
+    let shared = p256::ecdh::diffie_hellman(sk.to_nonzero_scalar(), epk.as_affine());
+    let key = aes_key(id, shared.raw_secret_bytes().as_slice());
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).map_err(|_| anyhow!("bad key"))?;
+    let iv = B64.decode(&s.iv)?;
+    let nonce = aes_gcm::Nonce::try_from(iv.as_slice()).map_err(|_| anyhow!("bad nonce"))?;
+    let plain = cipher
+        .decrypt(&nonce, B64.decode(&s.ct)?.as_slice())
+        .map_err(|_| anyhow!("couldn't decrypt the secret"))?;
+    String::from_utf8(plain).context("the secret isn't text")
+}
+
+/// Ask in the page and wait for a signed answer. None if nobody answered in
+/// time.
+pub fn ask(spec: &Spec) -> Result<Option<Picked>> {
+    let vault = crate::store::vault();
+    let devs = devices(vault.as_ref());
+    if devs.is_empty() {
+        bail!(
+            "keymule needs your OK, and there's no screen here for a dialog. Open the keymule \
+             page (run `keymule ui` in your own terminal, forward its port if this is a \
+             container) and click \"Pair this browser\" with the code it prints"
+        );
+    }
+    let id = random_id()?;
+    let sk = if spec.secure {
+        use p256::elliptic_curve::Generate;
+        Some(p256::SecretKey::generate())
+    } else {
+        None
+    };
+    let epk = sk
+        .as_ref()
+        .map(|k| B64.encode(k.public_key().to_sec1_bytes()));
+    let now = crate::trust::now();
+    let request = serde_json::to_string(&json!({
+        "id": id,
+        "created": now,
+        "expires": now + spec.timeout as u64,
+        "spec": spec,
+        "epk": epk,
+    }))?;
+    let d = dir()?;
+    let req_path = d.join(format!("{id}.req.json"));
+    let ans_path = d.join(format!("{id}.ans.json"));
+    write_atomic(&req_path, &request)?;
+    eprintln!(
+        "keymule: waiting for you to answer in the keymule page (up to {} min)…",
+        spec.timeout.div_ceil(60)
+    );
+    let deadline = Instant::now() + Duration::from_secs(spec.timeout as u64);
+    let picked = loop {
+        if Instant::now() >= deadline {
+            break None;
+        }
+        if let Ok(text) = std::fs::read_to_string(&ans_path) {
+            let _ = std::fs::remove_file(&ans_path);
+            let checked = serde_json::from_str::<Reply>(&text)
+                .map_err(|e| anyhow!("{e}"))
+                .and_then(|r| verify(&devs, &id, &request, &r).map(|_| r));
+            match checked {
+                Ok(r) if spec.buttons.contains(&r.button.as_str()) => {
+                    let text = match (&sk, &r.secret) {
+                        (Some(k), Some(s)) => Some(open_secret(k, &id, s)?),
+                        _ => None,
+                    };
+                    break Some(Picked {
+                        button: r.button,
+                        text,
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => crate::http::audit("-", "BAD-APPROVAL", &format!("{id}: {e}"), 0),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    let _ = std::fs::remove_file(&req_path);
+    Ok(picked)
+}
+
+/// The questions waiting now, exactly as written (the page signs over
+/// them). Old ones are cleared away.
+pub fn pending() -> Vec<String> {
+    let Ok(d) = dir() else { return vec![] };
+    let now = crate::trust::now();
+    let mut out: Vec<(u64, String)> = vec![];
+    let Ok(entries) = std::fs::read_dir(&d) else {
+        return vec![];
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".req.json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let expires = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v["expires"].as_u64())
+            .unwrap_or(0);
+        if expires <= now {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        out.push((expires, text));
+    }
+    out.sort();
+    out.into_iter().map(|(_, t)| t).collect()
+}
+
+/// Hand an answer from the page to the process that asked. Checked here too,
+/// so the page hears straight away when something's wrong.
+pub fn answer(vault: &dyn Vault, id: &str, reply: &Reply) -> Result<()> {
+    if !is_id(id) {
+        bail!("bad id");
+    }
+    let d = dir()?;
+    let request = std::fs::read_to_string(d.join(format!("{id}.req.json")))
+        .map_err(|_| anyhow!("that question has already been answered or timed out"))?;
+    verify(&devices(vault), id, &request, reply)?;
+    write_atomic(
+        &d.join(format!("{id}.ans.json")),
+        &serde_json::to_string(reply)?,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::testing::MemVault;
+    use p256::ecdsa::signature::Signer;
+
+    fn browser() -> (p256::ecdsa::SigningKey, Device) {
+        use p256::elliptic_curve::Generate;
+        let sk = p256::ecdsa::SigningKey::generate();
+        let key = B64.encode(sk.verifying_key().to_sec1_point(false).as_bytes());
+        (sk, new_device("Chrome on my Mac", &key).unwrap())
+    }
+
+    fn sign(sk: &p256::ecdsa::SigningKey, msg: &str) -> String {
+        let sig: p256::ecdsa::Signature = sk.sign(msg.as_bytes());
+        B64.encode(sig.to_bytes())
+    }
+
+    #[test]
+    fn only_a_paired_browser_can_answer() {
+        let (sk, dev) = browser();
+        let (other, _) = browser();
+        let req = r#"{"id":"x"}"#;
+        let mut reply = Reply {
+            button: "Allow".into(),
+            device: dev.id.clone(),
+            sig: sign(&sk, &message("x", req, "Allow", None)),
+            secret: None,
+        };
+        assert!(verify(std::slice::from_ref(&dev), "x", req, &reply).is_ok());
+
+        reply.sig = sign(&other, &message("x", req, "Allow", None));
+        assert!(
+            verify(std::slice::from_ref(&dev), "x", req, &reply).is_err(),
+            "another key"
+        );
+
+        reply.sig = sign(&sk, &message("x", req, "Cancel", None));
+        assert!(
+            verify(std::slice::from_ref(&dev), "x", req, &reply).is_err(),
+            "another answer"
+        );
+
+        reply.sig = sign(&sk, &message("x", r#"{"id":"y"}"#, "Allow", None));
+        assert!(
+            verify(std::slice::from_ref(&dev), "x", req, &reply).is_err(),
+            "another question"
+        );
+
+        reply.sig = sign(&sk, &message("x", req, "Allow", None));
+        assert!(verify(&[], "x", req, &reply).is_err(), "not paired");
+    }
+
+    #[test]
+    fn a_typed_secret_only_opens_for_the_process_that_asked() {
+        use aes_gcm::aead::{Aead, KeyInit};
+        use p256::elliptic_curve::Generate;
+        // The asking process's one-off key, and the page's side of ECDH.
+        let asker = p256::SecretKey::generate();
+        let page = p256::SecretKey::generate();
+        let shared =
+            p256::ecdh::diffie_hellman(page.to_nonzero_scalar(), asker.public_key().as_affine());
+        let key = aes_key("id1", shared.raw_secret_bytes().as_slice());
+        let iv = [7u8; 12];
+        let ct = aes_gcm::Aes256Gcm::new_from_slice(&key)
+            .unwrap()
+            .encrypt(
+                &aes_gcm::Nonce::try_from(&iv[..]).unwrap(),
+                b"tok_123".as_ref(),
+            )
+            .unwrap();
+        let sealed = SealedSecret {
+            epk: B64.encode(page.public_key().to_sec1_bytes()),
+            iv: B64.encode(iv),
+            ct: B64.encode(ct),
+        };
+        assert_eq!(open_secret(&asker, "id1", &sealed).unwrap(), "tok_123");
+        assert!(
+            open_secret(&asker, "id2", &sealed).is_err(),
+            "bound to the question"
+        );
+        let stranger = p256::SecretKey::generate();
+        assert!(open_secret(&stranger, "id1", &sealed).is_err());
+    }
+
+    #[test]
+    fn devices_are_kept_in_the_vault() {
+        let v = MemVault::default();
+        let (_, dev) = browser();
+        assert!(devices(&v).is_empty());
+        add_device(&v, dev.clone()).unwrap();
+        add_device(&v, dev.clone()).unwrap();
+        assert_eq!(devices(&v), vec![dev.clone()], "pairing twice keeps one");
+        assert!(remove_device(&v, &dev.id).unwrap());
+        assert!(v.get(DEVICES).is_err());
+        assert!(new_device("x", "not base64!").is_err());
+    }
+}
