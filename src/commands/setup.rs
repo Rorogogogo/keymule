@@ -7,6 +7,7 @@ use anyhow::Result;
 #[cfg(not(target_os = "macos"))]
 use anyhow::bail;
 
+#[cfg(target_os = "macos")]
 use crate::*;
 
 pub(super) fn home() -> Result<std::path::PathBuf> {
