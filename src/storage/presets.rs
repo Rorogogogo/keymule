@@ -24,6 +24,9 @@ pub enum Kind {
     /// An AWS access key ID and secret, stored as two lines: handed to a
     /// program as AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
     AwsKeys,
+    /// An SSH login: a password or private key for one server and account,
+    /// only used by `keymule ssh`.
+    Ssh,
 }
 
 #[derive(Debug)]
@@ -191,6 +194,23 @@ pub const PRESETS: &[Preset] = &[
         extra_hosts: &[],
         cli_env: None,
         kind: Kind::PrivateKey,
+    },
+    Preset {
+        id: "ssh",
+        title: "SSH login",
+        default_url: None,
+        url_example: "",
+        auth: AuthKind::Bearer,
+        verify_path: None,
+        accept: "",
+        keywords: &[], // added with add_ssh_credential, not guessed from a paste
+        hint: "An SSH login for one server. Run commands there with \
+               `keymule ssh <name> -- <command>` (e.g. -- uptime): keymule runs ssh and answers \
+               its password or key prompt itself, only for that server and account. The user \
+               approves it once per folder. Not for http_request.",
+        extra_hosts: &[],
+        cli_env: None,
+        kind: Kind::Ssh,
     },
     Preset {
         id: "aws",

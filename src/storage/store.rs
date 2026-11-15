@@ -46,7 +46,154 @@ pub struct Credential {
     /// "cli" or "paste-hook".
     #[serde(default)]
     pub added_by: String,
+    /// For an SSH login: the server and account it's for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshTarget>,
 }
+
+/// How an SSH login authenticates: the secret is a password or a private key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SshAuth {
+    Password,
+    /// A private key held in keymule's vault (pasted once).
+    Key,
+    /// A private key file already on this machine (`key_file`), used where
+    /// it is; the vault keeps the password, if any, alongside.
+    #[serde(rename = "key-file")]
+    KeyFile,
+}
+
+/// The server an SSH login is for. Sealed with the secret, so editing
+/// credentials.toml can't point the password at another machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshTarget {
+    /// Host name or IP address.
+    pub host: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    pub username: String,
+    pub auth: SshAuth,
+    /// For `KeyFile`: the private key's absolute path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_file: Option<String>,
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
+impl SshTarget {
+    /// A checked target: host and username can't be taken for ssh options.
+    pub fn new(host: &str, port: Option<u16>, username: &str, auth: SshAuth) -> Result<Self> {
+        let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+        let ok_host = !host.is_empty()
+            && host.len() <= 253
+            && !host.starts_with('-')
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_'));
+        if !ok_host {
+            bail!("host should be a host name or IP address, like 203.0.113.7 or vps.example.com");
+        }
+        let username = username.trim();
+        let ok_user = !username.is_empty()
+            && username.len() <= 64
+            && !username.starts_with('-')
+            && username
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+        if !ok_user {
+            bail!("username should be a login name like root or deploy");
+        }
+        let port = port.unwrap_or(22);
+        if port == 0 {
+            bail!("port should be between 1 and 65535");
+        }
+        Ok(Self {
+            host: host.to_ascii_lowercase(),
+            port,
+            username: username.to_string(),
+            auth,
+            key_file: None,
+        })
+    }
+
+    /// Log in with the private key at `path` (on this machine), checked to be
+    /// one: a readable file whose first line is a PEM private key header.
+    pub fn with_key_file(mut self, path: &str) -> Result<Self> {
+        self.auth = SshAuth::KeyFile;
+        self.key_file = Some(check_key_file(path)?);
+        Ok(self)
+    }
+
+    /// The key file's path, with the home folder as `~`, if it has one.
+    pub fn key_file_label(&self) -> Option<String> {
+        self.key_file
+            .as_deref()
+            .map(|p| crate::cliexec::tilde(std::path::Path::new(p)))
+    }
+
+    /// "root@203.0.113.7" (with ":port" when it isn't 22).
+    pub fn label(&self) -> String {
+        if self.port == 22 {
+            format!("{}@{}", self.username, self.host)
+        } else {
+            format!("{}@{}:{}", self.username, self.host, self.port)
+        }
+    }
+
+    pub fn auth_label(&self) -> String {
+        match self.auth {
+            SshAuth::Password => "password".into(),
+            SshAuth::Key => "private key".into(),
+            SshAuth::KeyFile => format!(
+                "key file {}",
+                self.key_file_label().unwrap_or_else(|| "(none set)".into())
+            ),
+        }
+    }
+}
+
+/// `path` (`~` expanded) made absolute, if it's a private key file. Only
+/// its first line is read, to check the header.
+pub fn check_key_file(path: &str) -> Result<String> {
+    use std::io::Read;
+    let path = path.trim();
+    let expanded = match path.strip_prefix("~/") {
+        Some(rest) => {
+            let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME is not set"))?;
+            PathBuf::from(home).join(rest)
+        }
+        None => PathBuf::from(path),
+    };
+    if !expanded.is_absolute() {
+        bail!("give the key file's full path, like ~/.ssh/id_ed25519");
+    }
+    if expanded.extension().is_some_and(|e| e == "pub") {
+        bail!("{path} is a public key; give the private key (the same name without .pub)");
+    }
+    let real = expanded
+        .canonicalize()
+        .with_context(|| format!("can't find a key file at {path}"))?;
+    if !real.is_file() {
+        bail!("{path} isn't a file");
+    }
+    let mut head = [0u8; 80];
+    let n = std::fs::File::open(&real)
+        .and_then(|mut f| f.read(&mut head))
+        .with_context(|| format!("can't read {path}"))?;
+    let first = String::from_utf8_lossy(&head[..n]);
+    let first = first.lines().next().unwrap_or("");
+    if !(first.starts_with("-----BEGIN") && first.contains("PRIVATE KEY")) {
+        bail!(
+            "{path} doesn't look like a private key (it should start with -----BEGIN … PRIVATE KEY-----)"
+        );
+    }
+    Ok(real.to_string_lossy().into_owned())
+}
+
+impl SshTarget {}
 
 /// An MCP server whose secrets keymule holds (see `keymule adopt`). This is
 /// a description for humans; what the secrets may be handed to is sealed in
@@ -65,6 +212,9 @@ pub struct ServerMeta {
     /// Config entries that run it, e.g. "~/.claude.json · acme".
     #[serde(default)]
     pub used_by: Vec<String>,
+    /// What it is, in a line (from add_mcp_secret or `keymule edit`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -232,6 +382,9 @@ pub struct Sealed {
     /// Copies the user put in git's credential store (`keymule install`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub installs: Vec<Install>,
+    /// For an SSH login, the only server it's used for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshTarget>,
 }
 
 /// One program in one folder that may get a credential via `keymule exec`.
@@ -273,6 +426,7 @@ impl Sealed {
             auth: cred.auth.clone(),
             exec_grants: vec![],
             installs: vec![],
+            ssh: cred.ssh.clone(),
         }
     }
 
@@ -315,6 +469,7 @@ impl Sealed {
         Credential {
             hosts: self.hosts.clone(),
             auth: self.auth.clone(),
+            ssh: self.ssh.clone(),
             ..cred.clone()
         }
     }
@@ -322,7 +477,7 @@ impl Sealed {
     /// True if credentials.toml disagrees with the sealed rules, i.e. the
     /// file was edited by hand (or by something else).
     pub fn differs_from(&self, cred: &Credential) -> bool {
-        self.hosts != cred.hosts || self.auth != cred.auth
+        self.hosts != cred.hosts || self.auth != cred.auth || self.ssh != cred.ssh
     }
 }
 
@@ -465,6 +620,7 @@ mod tests {
             auth: Auth::Bearer,
             hosts: vec!["api.github.com".into()],
             added_by: "test".into(),
+            ssh: None,
         };
         store.creds.insert("github".into(), cred.clone());
         store.creds.insert("github-work".into(), cred.clone());
@@ -504,6 +660,7 @@ mod tests {
                 },
                 hosts: vec!["bamboo.corp.com".into()],
                 added_by: "cli".into(),
+                ssh: None,
             },
         );
         store.save().unwrap();
@@ -523,6 +680,7 @@ mod tests {
             auth: Auth::Bearer,
             hosts: vec!["bamboo.corp".into()],
             added_by: "cli".into(),
+            ssh: None,
         };
         // An item from before sealing is upgraded on first load.
         vault.set("b", "tok-123").unwrap();

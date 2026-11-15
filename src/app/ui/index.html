@@ -51,11 +51,21 @@
                 <option value="stripe">Stripe</option>
                 <option value="openai">OpenAI</option>
                 <option value="generic">Any HTTP API</option>
+                <option value="ssh">SSH login</option>
               </select>
               <input id="url" class="field url" type="url" spellcheck="false" aria-label="Base URL">
+              <input id="sshhost" class="field url" type="text" spellcheck="false" placeholder="Host or IP, e.g. 203.0.113.7" aria-label="Host or IP" hidden>
+              <input id="sshuser" class="field short" type="text" spellcheck="false" placeholder="Username" aria-label="Username" hidden>
+              <input id="sshport" class="field port" type="text" inputmode="numeric" placeholder="22" aria-label="Port" hidden>
+              <select id="sshauth" class="field" aria-label="Log in with" hidden>
+                <option value="password">Password</option>
+                <option value="key">Paste a private key</option>
+                <option value="keyfile">Key file on this Mac</option>
+              </select>
+              <input id="sshkeyfile" class="field url" type="text" spellcheck="false" placeholder="~/.ssh/id_ed25519" aria-label="Key file path" hidden>
               <button class="btn" type="submit">Add credential</button>
             </form>
-            <p class="note">You type the token into a keymule dialog, never into this page.</p>
+            <p id="addnote" class="note">You type the token into a keymule dialog, never into this page.</p>
           </section>
 
           <section class="sec" data-in="overview servers">

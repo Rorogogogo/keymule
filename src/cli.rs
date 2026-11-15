@@ -15,8 +15,12 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Cmd {
     /// Store a new credential (the secret is typed into a hidden prompt).
+    ///
+    /// An SSH login: keymule add ssh --name vps --host 203.0.113.7 --username root
+    #[command(verbatim_doc_comment)]
     Add {
-        /// Service preset: bamboo, github, gitlab, jenkins, generic.
+        /// Service preset: bamboo, github, gitlab, jenkins, generic, password, ssh…
+        /// (see `keymule presets`).
         service: Option<String>,
         #[arg(long)]
         name: Option<String>,
@@ -31,6 +35,20 @@ pub enum Cmd {
         header: Option<String>,
         #[arg(long)]
         description: Option<String>,
+        /// For ssh: the server's host name or IP address.
+        #[arg(long)]
+        host: Option<String>,
+        /// For ssh: the port (default 22).
+        #[arg(long)]
+        port: Option<u16>,
+        /// For ssh: log in with a private key (pasted in a keymule window)
+        /// instead of a password.
+        #[arg(long)]
+        key: bool,
+        /// For ssh: log in with this private key file on this machine (used
+        /// where it is, nothing copied), e.g. ~/.ssh/id_ed25519.
+        #[arg(long, value_name = "PATH")]
+        key_file: Option<String>,
         /// Skip checking the token against the service.
         #[arg(long)]
         no_verify: bool,
@@ -51,7 +69,8 @@ pub enum Cmd {
         #[arg(long)]
         description: Option<String>,
     },
-    /// Change a credential's URL, username, service or description.
+    /// Change a credential's URL, username, service or description (an SSH
+    /// login's host, port or username; an MCP server secret's description).
     Edit {
         name: String,
         #[arg(long)]
@@ -60,6 +79,16 @@ pub enum Cmd {
         username: Option<String>,
         #[arg(long)]
         service: Option<String>,
+        /// An SSH login's host or IP.
+        #[arg(long)]
+        host: Option<String>,
+        /// An SSH login's port.
+        #[arg(long)]
+        port: Option<u16>,
+        /// An SSH login: log in with this private key file (the stored
+        /// password is kept). An empty value switches back to the password.
+        #[arg(long, value_name = "PATH")]
+        key_file: Option<String>,
         #[arg(long)]
         description: Option<String>,
     },
@@ -131,6 +160,42 @@ pub enum Cmd {
         /// The command to run.
         #[arg(last = true, required = true)]
         command: Vec<String>,
+    },
+    /// Log in to the server of a stored SSH login and run a command there
+    /// (or open a session). keymule answers ssh's password prompt itself, or
+    /// hands it the key as a private file; you approve once per folder.
+    ///
+    /// keymule ssh vultr-ssh -- uptime
+    #[command(verbatim_doc_comment)]
+    Ssh {
+        name: String,
+        /// The command to run on the server (none: an interactive session).
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+    /// Turn an MCP server secret no MCP server uses into a credential: an
+    /// SSH login or a password. The value stays inside keymule; you confirm
+    /// in a dialog.
+    ///
+    /// keymule convert vultr-ssh --to ssh --host 203.0.113.7 --username root
+    #[command(verbatim_doc_comment)]
+    Convert {
+        name: String,
+        /// ssh or password.
+        #[arg(long, value_parser = ["ssh", "password"])]
+        to: String,
+        /// For ssh: the server's host name or IP address.
+        #[arg(long)]
+        host: Option<String>,
+        /// For ssh: the port (default 22).
+        #[arg(long)]
+        port: Option<u16>,
+        /// For ssh: the account to log in as.
+        #[arg(long)]
+        username: Option<String>,
+        /// What it's for (keeps the old one if left out).
+        #[arg(long)]
+        description: Option<String>,
     },
     /// Copy a credential into git's credential store so git uses it for
     /// https://<host> as <username> (asks you first).

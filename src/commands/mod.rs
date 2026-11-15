@@ -18,6 +18,36 @@ use setup::*;
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         Cmd::Add {
+            service: Some(service),
+            name,
+            username,
+            description,
+            host,
+            port,
+            key,
+            key_file,
+            dialog,
+            ..
+        } if service == "ssh" => {
+            add_ssh(
+                name,
+                host,
+                port,
+                username,
+                key,
+                key_file,
+                description,
+                dialog,
+            )
+            .await
+        }
+        Cmd::Add { host: Some(_), .. }
+        | Cmd::Add { port: Some(_), .. }
+        | Cmd::Add { key: true, .. }
+        | Cmd::Add {
+            key_file: Some(_), ..
+        } => bail!("--host, --port, --key and --key-file are for `keymule add ssh`"),
+        Cmd::Add {
             service,
             name,
             url,
@@ -26,6 +56,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             description,
             no_verify,
             dialog: true,
+            ..
         } => {
             let msg = mcp::add_with_dialog(mcp::AddArgs {
                 service: service.unwrap_or_else(|| "generic".into()),
@@ -49,6 +80,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             description,
             no_verify,
             dialog: false,
+            ..
         } => add(service, name, url, username, header, description, no_verify).await,
         Cmd::List { json: false } => list(),
         Cmd::List { json: true } => list_json(),
@@ -68,8 +100,20 @@ pub async fn run(cli: Cli) -> Result<()> {
             url,
             username,
             service,
+            host,
+            port,
+            key_file,
             description,
-        } => edit(&name, url, username, service, description),
+        } => edit(
+            &name,
+            url,
+            username,
+            service,
+            host,
+            port,
+            key_file,
+            description,
+        ),
         Cmd::Rotate {
             name,
             no_verify,
@@ -120,6 +164,28 @@ pub async fn run(cli: Cli) -> Result<()> {
             } else {
                 servers::exec(store::vault().as_ref(), &name, &rename, &command)
             }
+        }
+        Cmd::Ssh { name, command } => ssh::run(store::vault().as_ref(), &name, &command),
+        Cmd::Convert {
+            name,
+            to,
+            host,
+            port,
+            username,
+            description,
+        } => {
+            let to = ssh::ConvertTo::parse(&to, host.as_deref(), port, username.as_deref())?;
+            let mut store = Store::load()?;
+            let msg = ssh::convert(
+                store::vault().as_ref(),
+                &mut store,
+                &name,
+                to,
+                description,
+                &|m| trust::confirm(m),
+            )?;
+            println!("{msg}");
+            Ok(())
         }
         Cmd::Install {
             name,

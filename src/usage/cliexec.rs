@@ -232,6 +232,9 @@ fn vars_for(store: &Store, name: &str, given: &[String], files: &[String]) -> Re
     } else {
         match preset.cli_env {
             Some((var, _)) => vec![var.to_string()],
+            None if preset.kind == presets::Kind::Ssh => bail!(
+                "\"{name}\" is an SSH login: run commands on its server with keymule ssh {name} -- <command>"
+            ),
             None if preset.kind == presets::Kind::PrivateKey => bail!(
                 "say how the command gets the key: as a file, keymule exec {name} --file KEY -- ssh -i {{KEY}} …, or in an env var with --env VAR"
             ),
@@ -253,7 +256,7 @@ pub struct KeyFiles {
 }
 
 impl KeyFiles {
-    fn new() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let mut b = [0u8; 8];
         getrandom::fill(&mut b).map_err(|e| anyhow::anyhow!("no randomness: {e}"))?;
         let tag: String = b.iter().map(|x| format!("{x:02x}")).collect();
@@ -270,7 +273,7 @@ impl KeyFiles {
         Ok(Self { dir })
     }
 
-    fn write(&self, var: &str, secret: &str) -> Result<PathBuf> {
+    pub fn write(&self, var: &str, secret: &str) -> Result<PathBuf> {
         let path = self.dir.join(var.to_ascii_lowercase());
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
@@ -448,7 +451,7 @@ pub fn prepare_with(
     })
 }
 
-fn pump(mut from: impl Read, mut to: impl Write, secret: &str) {
+pub fn pump(mut from: impl Read, mut to: impl Write, secret: &str) {
     let mut scrub = Scrubber::new(secret);
     let mut buf = [0u8; 8192];
     loop {
@@ -533,6 +536,7 @@ mod tests {
             auth: Auth::Bearer,
             hosts: vec!["api.github.com".into()],
             added_by: "cli".into(),
+            ssh: None,
         };
         let vault = MemVault::default();
         Sealed::new(TOKEN, &cred)
@@ -786,6 +790,7 @@ mod tests {
             auth: Auth::Bearer,
             hosts: vec![],
             added_by: "test".into(),
+            ssh: None,
         };
         Sealed::new(secret, &cred).save(&vault, "it").unwrap();
         store.creds.insert("it".into(), cred);

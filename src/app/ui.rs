@@ -250,6 +250,15 @@ fn simple_name(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// A host name or an IP address (no spaces, can't be taken for an option).
+fn host_like(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 253
+        && !s.starts_with('-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_' | '[' | ']'))
+}
+
 fn api(ctx: &Ctx, method: &str, path: &str, body: &[u8]) -> Value {
     let body: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
     let field = |k: &str| body.get(k).and_then(Value::as_str).unwrap_or("").trim();
@@ -346,6 +355,80 @@ fn api(ctx: &Ctx, method: &str, path: &str, body: &[u8]) -> Value {
                 return json!({"ok": false, "stderr": "bad name"});
             }
             keymule(ctx, &["reveal", name])
+        }
+        ("POST", "/api/add") if field("service") == "ssh" => {
+            let (host, user, port) = (field("host"), field("username"), field("port"));
+            if !host_like(host)
+                || !simple_name(user)
+                || !(port.is_empty() || port.parse::<u16>().is_ok())
+            {
+                return json!({"ok": false, "stderr": "give the server's host or IP, the username, and a port number (or leave it empty)"});
+            }
+            let mut args = vec!["add", "ssh", "--dialog", "--host", host, "--username", user];
+            let name = field("name");
+            if !name.is_empty() {
+                if !simple_name(name) {
+                    return json!({"ok": false, "stderr": "a name uses letters, digits, '-' and '_'"});
+                }
+                args.extend(["--name", name]);
+            }
+            if !port.is_empty() {
+                args.extend(["--port", port]);
+            }
+            let key_file = format!("--key-file={}", field("key_file"));
+            match field("auth") {
+                "key" => args.push("--key"),
+                "keyfile" => {
+                    let f = field("key_file");
+                    if f.is_empty() || f.len() > 1024 || f.contains(['\n', '\r']) {
+                        return json!({"ok": false, "stderr": "give the key file's path, like ~/.ssh/id_ed25519"});
+                    }
+                    args.push(&key_file);
+                }
+                _ => {}
+            }
+            let description = format!("--description={}", field("description"));
+            if !field("description").is_empty() {
+                args.push(&description);
+            }
+            keymule(ctx, &args)
+        }
+        ("POST", "/api/convert") => {
+            let (name, to) = (field("name"), field("to"));
+            if !simple_name(name) || !["ssh", "password"].contains(&to) {
+                return json!({"ok": false, "stderr": "bad request"});
+            }
+            let mut args = vec!["convert", name, "--to", to];
+            let (host, user, port) = (field("host"), field("username"), field("port"));
+            if to == "ssh" {
+                if !host_like(host)
+                    || !simple_name(user)
+                    || !(port.is_empty() || port.parse::<u16>().is_ok())
+                {
+                    return json!({"ok": false, "stderr": "give the server's host or IP, the username, and a port number (or leave it empty)"});
+                }
+                args.extend(["--host", host, "--username", user]);
+                if !port.is_empty() {
+                    args.extend(["--port", port]);
+                }
+            }
+            let description = format!("--description={}", field("description"));
+            if !field("description").is_empty() {
+                args.push(&description);
+            }
+            keymule(ctx, &args)
+        }
+        ("POST", "/api/describe") => {
+            let name = field("name");
+            let text = body
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if !simple_name(name) || text.len() > 300 || text.contains('\n') {
+                return json!({"ok": false, "stderr": "a description is one line, up to 300 characters"});
+            }
+            keymule(ctx, &["edit", name, &format!("--description={text}")])
         }
         ("POST", "/api/add") => {
             let service = field("service");
@@ -465,5 +548,9 @@ mod tests {
         assert!(simple_name("pg-mcp_1"));
         assert!(!simple_name("a b"));
         assert!(!simple_name("--url"));
+        assert!(
+            host_like("203.0.113.7") && host_like("vps.example.com") && host_like("[2001:db8::1]")
+        );
+        assert!(!host_like("-oProxyCommand=x") && !host_like("a b") && !host_like(""));
     }
 }

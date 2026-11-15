@@ -4,7 +4,9 @@ use anyhow::{Result, bail};
 
 use super::setup::home;
 use crate::presets::{self, AuthKind, PRESETS};
-use crate::store::{self, Auth, Credential, Sealed, Store, host_of, validate_name};
+use crate::store::{
+    self, Auth, Credential, Sealed, SshAuth, SshTarget, Store, host_of, validate_name,
+};
 use crate::*;
 
 pub(super) async fn add(
@@ -59,6 +61,7 @@ pub(super) async fn add(
         auth,
         hosts,
         added_by: "cli".into(),
+        ssh: None,
     };
 
     if !no_verify {
@@ -79,6 +82,78 @@ pub(super) async fn add(
     store.creds.insert(name.clone(), cred);
     store.save()?;
     println!("Saved \"{name}\". Your agent can now use it by name; it will never see the secret.");
+    Ok(())
+}
+
+/// `keymule add ssh`: an SSH login. A password can be typed in the
+/// terminal; a key, or `--dialog`, goes through keymule's window.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn add_ssh(
+    name: Option<String>,
+    host: Option<String>,
+    port: Option<u16>,
+    username: Option<String>,
+    key: bool,
+    key_file: Option<String>,
+    description: Option<String>,
+    dialog: bool,
+) -> Result<()> {
+    let store = Store::load()?;
+    let name = match name {
+        Some(n) => n,
+        None if dialog => store.free_name("ssh"),
+        None => tty::ask_default("Name", &store.free_name("ssh"))?,
+    };
+    let host = match host {
+        Some(h) => h,
+        None if dialog => bail!("give the server with --host (a host name or IP)"),
+        None => tty::ask("Host or IP: ")?,
+    };
+    let username = match username {
+        Some(u) => u,
+        None if dialog => bail!("give the account with --username"),
+        None => tty::ask_default("Username", "root")?,
+    };
+    if dialog || key || key_file.is_some() {
+        let msg = mcp::add_ssh(mcp::SshArgs {
+            key_file,
+            name,
+            host,
+            port,
+            username,
+            auth: Some(if key { "key" } else { "password" }.into()),
+            description,
+        })
+        .await?;
+        println!("{msg}");
+        return Ok(());
+    }
+    validate_name(&name)?;
+    if store.creds.contains_key(&name) || store.servers.contains_key(&name) {
+        bail!("\"{name}\" already exists; pick another name");
+    }
+    let target = SshTarget::new(&host, port, &username, SshAuth::Password)?;
+    let secret = tty::secret(&format!("SSH password for {} (hidden): ", target.label()))?;
+    if secret.is_empty() {
+        bail!("nothing was typed; nothing was saved");
+    }
+    let cred = Credential {
+        service: "ssh".into(),
+        url: String::new(),
+        description: description.unwrap_or_default(),
+        auth: Auth::Bearer,
+        hosts: vec![],
+        added_by: "cli".into(),
+        ssh: Some(target.clone()),
+    };
+    let mut store = Store::load()?;
+    Sealed::new(secret, &cred).save(store::vault().as_ref(), &name)?;
+    store.creds.insert(name.clone(), cred);
+    store.save()?;
+    println!(
+        "Saved \"{name}\" (SSH login for {}). Run commands there with: keymule ssh {name} -- <command>",
+        target.label()
+    );
     Ok(())
 }
 
@@ -105,11 +180,29 @@ pub(super) fn list() -> Result<()> {
             what.trim(),
             s.used_by.len()
         );
+        if !s.description.is_empty() {
+            println!("  {}", s.description);
+        }
     }
     let vault = store::vault();
     for (name, c) in &store.creds {
         // Passwords, keys and AWS pairs aren't for HTTP: say how they're used.
+        let ssh_label;
         let (url, auth) = match presets::get_or_generic(&c.service).kind {
+            presets::Kind::Ssh => {
+                ssh_label = c
+                    .ssh
+                    .as_ref()
+                    .map(|t| format!("{} · keymule ssh {name}", t.label()))
+                    .unwrap_or_else(|| "(no server: keymule edit --host --username)".into());
+                (
+                    ssh_label.as_str(),
+                    c.ssh
+                        .as_ref()
+                        .map(|t| t.auth_label().to_string())
+                        .unwrap_or_default(),
+                )
+            }
             presets::Kind::Http if c.url.is_empty() => {
                 ("(no URL: keymule edit --url)", c.auth.label())
             }
@@ -119,6 +212,9 @@ pub(super) fn list() -> Result<()> {
             presets::Kind::AwsKeys => ("for programs: keymule exec (AWS_* vars)", String::new()),
         };
         println!("{name:<16} {:<11} {:<40} {auth}", c.service, url);
+        if !c.description.is_empty() {
+            println!("  {}", c.description);
+        }
         if let Ok(sealed) = Sealed::load(vault.as_ref(), name, c)
             && sealed.differs_from(c)
         {
@@ -153,7 +249,16 @@ pub(super) fn list_json() -> Result<()> {
                     presets::Kind::Password => "password",
                     presets::Kind::PrivateKey => "private-key",
                     presets::Kind::AwsKeys => "aws",
+                    presets::Kind::Ssh => "ssh",
                 },
+                "ssh": used.ssh.as_ref().map(|t| serde_json::json!({
+                    "host": t.host,
+                    "port": t.port,
+                    "username": t.username,
+                    "auth": t.auth_label(),
+                    "label": t.label(),
+                    "key_file": t.key_file_label(),
+                })),
                 "url": c.url,
                 "hosts": used.hosts,
                 "auth": used.auth.label(),
@@ -176,6 +281,7 @@ pub(super) fn list_json() -> Result<()> {
                 "headers": s.headers,
                 "arg_secrets": s.arg_secrets,
                 "used_by": s.used_by,
+                "description": s.description,
             })
         })
         .collect();
@@ -190,18 +296,118 @@ pub(super) fn list_json() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn edit(
     name: &str,
     url: Option<String>,
     username: Option<String>,
     service: Option<String>,
+    host: Option<String>,
+    port: Option<u16>,
+    key_file: Option<String>,
     description: Option<String>,
 ) -> Result<()> {
     let mut store = Store::load()?;
+    if !store.creds.contains_key(name)
+        && let Some(meta) = store.servers.get_mut(name)
+    {
+        // An MCP server secret: only its description is yours to edit here.
+        if url.is_some()
+            || username.is_some()
+            || service.is_some()
+            || host.is_some()
+            || port.is_some()
+            || key_file.is_some()
+        {
+            bail!(
+                "\"{name}\" is an MCP server secret: only --description can change (to make it an \
+                 SSH login or a password, use keymule convert {name})"
+            );
+        }
+        let Some(d) = description else {
+            bail!("nothing to change: pass --description");
+        };
+        meta.description = d;
+        store.save()?;
+        println!("Updated \"{name}\".");
+        return Ok(());
+    }
     let vault = store::vault();
     let mut sealed = Sealed::load(vault.as_ref(), name, store.get(name)?)?;
     // Start from the sealed rules, not whatever the file says now.
     let mut cred = sealed.apply(store.get(name)?);
+    let is_ssh = presets::get_or_generic(&cred.service).kind == presets::Kind::Ssh;
+    if !is_ssh && (host.is_some() || port.is_some() || key_file.is_some()) {
+        bail!("--host, --port and --key-file are for SSH logins; \"{name}\" isn't one");
+    }
+    if is_ssh {
+        if url.is_some() || service.is_some() {
+            bail!("\"{name}\" is an SSH login: change --host, --port, --username or --description");
+        }
+        let old = cred.ssh.clone();
+        let mut new = match (&old, &host) {
+            (Some(t), _) => {
+                let mut n = SshTarget::new(
+                    host.as_deref().unwrap_or(&t.host),
+                    Some(port.unwrap_or(t.port)),
+                    username.as_deref().unwrap_or(&t.username),
+                    t.auth,
+                )?;
+                n.key_file = t.key_file.clone();
+                n
+            }
+            (None, Some(h)) => {
+                let auth = if sealed.secret.trim_start().starts_with("-----BEGIN") {
+                    SshAuth::Key
+                } else {
+                    SshAuth::Password
+                };
+                SshTarget::new(
+                    h,
+                    port,
+                    username
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("give --username too"))?,
+                    auth,
+                )?
+            }
+            (None, None) => bail!("give the server with --host and --username"),
+        };
+        match key_file.as_deref().map(str::trim) {
+            Some("") if sealed.secret.is_empty() => {
+                bail!("\"{name}\" has no password stored; add one with keymule rotate {name} first")
+            }
+            Some("") => {
+                new.auth = SshAuth::Password;
+                new.key_file = None;
+            }
+            Some(path) => new = new.with_key_file(path)?,
+            None => {}
+        }
+        if old
+            .as_ref()
+            .is_some_and(|t| t.host != new.host || t.port != new.port)
+        {
+            let question = format!("Use \"{name}\" to log in to {} instead?", new.label());
+            let here = std::env::current_dir().unwrap_or_default();
+            if !trust::skips(vault.as_ref(), &here, &question) {
+                tty::confirm(&question)?;
+            }
+        }
+        if old.as_ref() != Some(&new) {
+            sealed.exec_grants.clear(); // approvals named the old server
+        }
+        cred.ssh = Some(new);
+        if let Some(d) = description {
+            cred.description = d;
+        }
+        sealed.ssh = cred.ssh.clone();
+        sealed.save(vault.as_ref(), name)?;
+        store.creds.insert(name.to_string(), cred);
+        store.save()?;
+        println!("Updated \"{name}\".");
+        return Ok(());
+    }
 
     if let Some(s) = service {
         let Some(p) = presets::find(&s) else {
@@ -291,11 +497,25 @@ pub(super) fn reveal(name: &str) -> Result<()> {
         if let Some(c) = store.creds.get(name) {
             let sealed = Sealed::load(vault.as_ref(), name, c)?;
             let mut items = Vec::new();
+            if let Some(t) = &sealed.ssh {
+                items.push(("Server".to_string(), t.label()));
+            }
             if let Auth::Basic { username } = &sealed.auth {
                 items.push(("Username".to_string(), username.clone()));
             }
-            items.push(("Secret".to_string(), sealed.secret.clone()));
-            (items, Some(sealed.secret))
+            if let Some(f) = sealed.ssh.as_ref().and_then(|t| t.key_file_label()) {
+                items.push(("Key file".to_string(), f));
+            }
+            let what = match sealed.ssh.as_ref().map(|t| t.auth) {
+                Some(SshAuth::Password | SshAuth::KeyFile) => "Password",
+                Some(SshAuth::Key) => "Private key",
+                None => "Secret",
+            };
+            if !sealed.secret.is_empty() {
+                items.push((what.to_string(), sealed.secret.clone()));
+            }
+            let copy = (!sealed.secret.is_empty()).then(|| sealed.secret.clone());
+            (items, copy)
         } else if store.servers.contains_key(name) {
             let b = servers::Binding::load(vault.as_ref(), name)?;
             let items: Vec<(String, String)> = b

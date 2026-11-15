@@ -221,6 +221,15 @@ h2 { font-size: 18px; font-weight: 600; letter-spacing: -0.015em; }
 .title { display: block; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sub { display: block; font-size: 13px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .acc { flex-shrink: 0; display: flex; align-items: center; gap: 12px; }
+.sub.wrap { white-space: normal; overflow-wrap: anywhere; }
+.desc { display: block; margin-top: 2px; font-size: 13px; color: var(--ink); white-space: normal; overflow-wrap: anywhere; }
+.inline { display: flex; gap: 8px; margin-top: 6px; }
+.inline .field { flex: 1; min-width: 0; }
+.convert { padding: 4px 8px 16px 54px; border-bottom: 1px solid var(--line); }
+.convert .addline { margin-top: 8px; }
+.addline .short { width: 120px; }
+.addline .port { width: 64px; }
+[hidden] { display: none !important; }
 .empty { padding: 20px 8px; color: var(--ink2); border-bottom: 1px solid var(--line); }
 .t-bad { color: var(--bad); }
 .t-warn { color: var(--warn); }
