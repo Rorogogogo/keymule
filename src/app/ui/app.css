@@ -396,6 +396,10 @@ pre.plan {
 }
 .asktext > :last-child { margin-bottom: 0; }
 .askval { display: block; width: 100%; margin-top: 12px; font-family: var(--mono); }
+.askval.multi {
+  height: 120px; padding: 8px 10px; resize: none; white-space: pre; overflow: auto;
+  font-size: 12px; line-height: 1.5; -webkit-text-security: disc;
+}
 .askerr { color: var(--bad); font-size: 12.5px; margin-top: 10px !important; }
 .askfoot {
   display: flex; justify-content: flex-end; align-items: center; gap: 8px;

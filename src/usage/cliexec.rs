@@ -215,23 +215,92 @@ fn valid_var(v: &str) -> bool {
         && !v.starts_with(|c: char| c.is_ascii_digit())
 }
 
-/// The env vars to put the secret in: `--env`, else the service's own.
-fn vars_for(store: &Store, name: &str, given: &[String]) -> Result<Vec<String>> {
-    let vars = if given.is_empty() {
-        let service = &store.get(name)?.service;
-        match presets::get_or_generic(service).cli_env {
+/// The env vars to put the secret in: `--env`, else the service's own. AWS
+/// keys always go in AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; a secret
+/// handed over only as a file (`--file`) needs no env var.
+fn vars_for(store: &Store, name: &str, given: &[String], files: &[String]) -> Result<Vec<String>> {
+    let preset = presets::get_or_generic(&store.get(name)?.service);
+    let vars = if preset.kind == presets::Kind::AwsKeys {
+        if !given.is_empty() {
+            bail!(
+                "\"{name}\" is AWS keys: they always go in AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, so leave out --env"
+            );
+        }
+        vec!["AWS_ACCESS_KEY_ID".into(), "AWS_SECRET_ACCESS_KEY".into()]
+    } else if !given.is_empty() || !files.is_empty() {
+        given.to_vec()
+    } else {
+        match preset.cli_env {
             Some((var, _)) => vec![var.to_string()],
+            None if preset.kind == presets::Kind::PrivateKey => bail!(
+                "say how the command gets the key: as a file, keymule exec {name} --file KEY -- ssh -i {{KEY}} …, or in an env var with --env VAR"
+            ),
             None => bail!(
                 "say which env var the command reads the secret from: keymule exec {name} --env VAR -- <command…>"
             ),
         }
-    } else {
-        given.to_vec()
     };
-    if let Some(bad) = vars.iter().find(|v| !valid_var(v)) {
+    if let Some(bad) = vars.iter().chain(files).find(|v| !valid_var(v)) {
         bail!("`{bad}` isn't an env var name (use capitals, digits and _)");
     }
     Ok(vars)
+}
+
+/// A secret written to a file for one command: in a folder only you can
+/// read, removed when this is dropped (after the command ends).
+pub struct KeyFiles {
+    dir: PathBuf,
+}
+
+impl KeyFiles {
+    fn new() -> Result<Self> {
+        let mut b = [0u8; 8];
+        getrandom::fill(&mut b).map_err(|e| anyhow::anyhow!("no randomness: {e}"))?;
+        let tag: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        let dir = std::env::temp_dir().join(format!("keymule-{tag}"));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(&dir)
+            .context("making a private folder for the key")?;
+        Ok(Self { dir })
+    }
+
+    fn write(&self, var: &str, secret: &str) -> Result<PathBuf> {
+        let path = self.dir.join(var.to_ascii_lowercase());
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&path).context("writing the key file")?;
+        f.write_all(secret.as_bytes())?;
+        if !secret.ends_with('\n') {
+            f.write_all(b"\n")?;
+        }
+        Ok(path)
+    }
+}
+
+impl Drop for KeyFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// A command ready to run with a secret.
+pub struct Prepared {
+    pub cmd: Command,
+    /// What to scrub from its output.
+    pub scrub: String,
+    /// Key files it was given; they go away when this is dropped.
+    pub files: Option<KeyFiles>,
 }
 
 /// Everything up to starting the command: checks, the approval, the
@@ -252,6 +321,7 @@ pub fn prepare(
 /// [`prepare`], and with `allow_all` (the folder has allow-all on) a new
 /// program runs without asking and without being remembered, so turning
 /// allow-all off brings the question back.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_in(
     vault: &dyn Vault,
@@ -263,10 +333,39 @@ pub fn prepare_in(
     confirm: &dyn Fn(&str) -> Result<bool>,
     allow_all: bool,
 ) -> Result<(Command, String)> {
+    let p = prepare_with(
+        vault,
+        store,
+        name,
+        given_vars,
+        &[],
+        argv,
+        dir,
+        confirm,
+        allow_all,
+    )?;
+    Ok((p.cmd, p.scrub))
+}
+
+/// [`prepare_in`] with `files`: env vars that get the path of a file holding
+/// the secret (for a private key), also put where `{VAR}` is in the command.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_with(
+    vault: &dyn Vault,
+    store: &Store,
+    name: &str,
+    given_vars: &[String],
+    files: &[String],
+    argv: &[String],
+    dir: &Path,
+    confirm: &dyn Fn(&str) -> Result<bool>,
+    allow_all: bool,
+) -> Result<Prepared> {
     let Some(program) = argv.first() else {
-        bail!("usage: keymule exec <name> [--env VAR] -- <command> [args…]");
+        bail!("usage: keymule exec <name> [--env VAR] [--file VAR] -- <command> [args…]");
     };
-    let vars = vars_for(store, name, given_vars)?;
+    let vars = vars_for(store, name, given_vars, files)?;
+    let kind = presets::get_or_generic(&store.get(name)?.service).kind;
     let path = resolve_in(program, allow_all)?;
     let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let mut sealed = Sealed::load(vault, name, store.get(name)?)?;
@@ -288,7 +387,11 @@ pub fn prepare_in(
             "Let {tool} use \"{name}\"?\n\n        {}\n\n\
              As {} in {}. keymule hides it from the output.",
             argv.join(" "),
-            vars.join(", "),
+            vars.iter()
+                .cloned()
+                .chain(files.iter().map(|f| format!("a file ({f})")))
+                .collect::<Vec<_>>()
+                .join(", "),
             tilde(&dir),
         ))
         .context("keymule needs to ask you about a new program, but can't show a dialog here")?;
@@ -304,15 +407,45 @@ pub fn prepare_in(
         });
         sealed.save(vault, name)?;
     }
+    let mut args: Vec<String> = argv[1..].to_vec();
     let mut cmd = Command::new(&path);
-    cmd.args(&argv[1..]).current_dir(&dir);
+    cmd.current_dir(&dir);
     for var in crate::servers::STRIP_ENV {
         cmd.env_remove(var);
     }
-    for var in &vars {
-        cmd.env(var, &sealed.secret);
+    let mut scrub = sealed.secret.clone();
+    if kind == presets::Kind::AwsKeys {
+        let (id, secret) = sealed.secret.split_once('\n').ok_or_else(|| {
+            anyhow::anyhow!("\"{name}\" should hold an access key ID and a secret, on two lines")
+        })?;
+        cmd.env("AWS_ACCESS_KEY_ID", id.trim());
+        cmd.env("AWS_SECRET_ACCESS_KEY", secret.trim());
+        scrub = secret.trim().to_string();
+    } else {
+        for var in &vars {
+            cmd.env(var, &sealed.secret);
+        }
     }
-    Ok((cmd, sealed.secret))
+    let key_files = if files.is_empty() {
+        None
+    } else {
+        let kf = KeyFiles::new()?;
+        for var in files {
+            let file = kf.write(var, &sealed.secret)?;
+            let file = file.to_string_lossy().into_owned();
+            cmd.env(var, &file);
+            for a in &mut args {
+                *a = a.replace(&format!("{{{var}}}"), &file);
+            }
+        }
+        Some(kf)
+    };
+    cmd.args(&args);
+    Ok(Prepared {
+        cmd,
+        scrub,
+        files: key_files,
+    })
 }
 
 fn pump(mut from: impl Read, mut to: impl Write, secret: &str) {
@@ -332,15 +465,26 @@ fn pump(mut from: impl Read, mut to: impl Write, secret: &str) {
 }
 
 /// Run it with its output scrubbed, and exit with its exit code.
-pub fn run(vault: &dyn Vault, name: &str, vars: &[String], argv: &[String]) -> Result<()> {
+pub fn run(
+    vault: &dyn Vault,
+    name: &str,
+    vars: &[String],
+    files: &[String],
+    argv: &[String],
+) -> Result<()> {
     let store = Store::load()?;
     let dir = std::env::current_dir()?;
     let all = crate::trust::covering(vault, &dir, crate::trust::now()).is_some();
-    let (mut cmd, secret) = prepare_in(
+    let Prepared {
+        mut cmd,
+        scrub: secret,
+        files: key_files,
+    } = prepare_with(
         vault,
         &store,
         name,
         vars,
+        files,
         argv,
         &dir,
         &|msg| crate::dialog::confirm(msg),
@@ -366,6 +510,7 @@ pub fn run(vault: &dyn Vault, name: &str, vars: &[String], argv: &[String]) -> R
     let status = child.wait()?;
     let _ = t1.join();
     let _ = t2.join();
+    drop(key_files); // remove key files before exiting
     std::process::exit(status.code().unwrap_or(1));
 }
 
@@ -627,6 +772,160 @@ mod tests {
                 &yes
             )
             .is_ok()
+        );
+    }
+
+    fn kind_store(service: &str, secret: &str) -> (tempfile::TempDir, Store, MemVault) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::load_from(dir.path().join("credentials.toml")).unwrap();
+        let vault = MemVault::default();
+        let cred = Credential {
+            service: service.into(),
+            url: String::new(),
+            description: String::new(),
+            auth: Auth::Bearer,
+            hosts: vec![],
+            added_by: "test".into(),
+        };
+        Sealed::new(secret, &cred).save(&vault, "it").unwrap();
+        store.creds.insert("it".into(), cred);
+        (dir, store, vault)
+    }
+
+    fn env_of(cmd: &Command, var: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == var)
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    #[test]
+    fn a_private_key_goes_to_the_command_as_a_private_file() {
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----";
+        let (dir, store, vault) = kind_store("private-key", pem);
+        let yes = |_: &str| -> Result<bool> { Ok(true) };
+        let err = prepare_with(
+            &vault,
+            &store,
+            "it",
+            &[],
+            &[],
+            &argv("true"),
+            dir.path(),
+            &yes,
+            false,
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("--file KEY"), "{err}");
+
+        let p = prepare_with(
+            &vault,
+            &store,
+            "it",
+            &[],
+            &["KEY".into()],
+            &argv("true -i {KEY} host"),
+            dir.path(),
+            &yes,
+            false,
+        )
+        .unwrap();
+        let file = env_of(&p.cmd, "KEY").unwrap();
+        let args: Vec<String> = p
+            .cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["-i", file.as_str(), "host"]);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), format!("{pem}\n"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        drop(p);
+        assert!(!std::path::Path::new(&file).exists(), "removed afterwards");
+    }
+
+    #[test]
+    fn aws_keys_go_in_their_two_variables() {
+        let (id, key) = (
+            crate::detect::fake::aws_id(),
+            crate::detect::fake::aws_secret(),
+        );
+        let (dir, store, vault) = kind_store("aws", &format!("{id}\n{key}"));
+        let yes = |_: &str| -> Result<bool> { Ok(true) };
+        let p = prepare_with(
+            &vault,
+            &store,
+            "it",
+            &[],
+            &[],
+            &argv("true"),
+            dir.path(),
+            &yes,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            env_of(&p.cmd, "AWS_ACCESS_KEY_ID").as_deref(),
+            Some(id.as_str())
+        );
+        assert_eq!(
+            env_of(&p.cmd, "AWS_SECRET_ACCESS_KEY").as_deref(),
+            Some(key.as_str())
+        );
+        assert_eq!(p.scrub, key);
+        assert!(
+            prepare_with(
+                &vault,
+                &store,
+                "it",
+                &["X".into()],
+                &[],
+                &argv("true"),
+                dir.path(),
+                &yes,
+                false
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_password_needs_its_env_var_named() {
+        let (dir, store, vault) = kind_store("password", "Tr0ub4dor&3x");
+        let yes = |_: &str| -> Result<bool> { Ok(true) };
+        let err = prepare_with(
+            &vault,
+            &store,
+            "it",
+            &[],
+            &[],
+            &argv("true"),
+            dir.path(),
+            &yes,
+            false,
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("--env VAR"), "{err}");
+        let p = prepare_with(
+            &vault,
+            &store,
+            "it",
+            &["PGPASSWORD".into()],
+            &[],
+            &argv("true"),
+            dir.path(),
+            &yes,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            env_of(&p.cmd, "PGPASSWORD").as_deref(),
+            Some("Tr0ub4dor&3x")
         );
     }
 }

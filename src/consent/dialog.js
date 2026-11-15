@@ -1,4 +1,4 @@
-// keymule's dialogs on macOS: a small window showing src/dialog.html,
+// keymule's dialogs on macOS: a small window showing dialog.html,
 // run by `osascript -l JavaScript`.
 //
 // The spec arrives as a JSON literal in the script keymule pipes to

@@ -292,6 +292,13 @@ function rowAttrs(name) {
   }
 }
 
+// How passwords, keys and AWS pairs are used: only by programs, never HTTP.
+const USE_HINT = {
+  password: 'for programs: keymule exec --env VAR',
+  'private-key': 'for programs, as a file: keymule exec --file KEY',
+  aws: 'for programs: keymule exec (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)',
+}
+
 function renderCreds(creds) {
   $('ncreds').textContent = creds.length || ''
   if (!creds.length) return [h('div', { class: 'empty' }, 'No API credentials yet. Add one below, or ask your agent: it opens the same dialog.')]
@@ -301,7 +308,9 @@ function renderCreds(creds) {
       ico('key'),
       h('span', { class: 'body' },
         h('span', { class: 'title' }, c.name),
-        h('span', { class: 'sub', title: c.description || null }, join([c.description || c.service, (c.hosts || []).join(', '), c.auth, ...(c.installed || []).map(i => `copied to ${i}`)]))),
+        h('span', { class: 'sub', title: c.description || null }, join(c.kind && c.kind !== 'http'
+          ? [c.description || c.service, USE_HINT[c.kind]]
+          : [c.description || c.service, (c.hosts || []).join(', '), c.auth, ...(c.installed || []).map(i => `copied to ${i}`)]))),
       h('span', { class: 'acc' }, status, revealButton(c.name), rotateButton(c.name), deleteButton(c.name)))
   })
 }
@@ -602,6 +611,22 @@ function askBody(body) {
   })
 }
 
+// The field for a secret: one line, or several (a private key, AWS keys),
+// hidden either way. Enter saves one line; ⌘/Ctrl-Enter saves several.
+function secretField(item, s) {
+  const el = h(s.multiline ? 'textarea' : 'input', {
+    id: 'askval', class: `field askval${s.multiline ? ' multi' : ''}`,
+    type: s.multiline ? null : 'password', autocomplete: 'off', spellcheck: 'false',
+    placeholder: s.multiline ? 'Paste it here (⌘↩ saves)' : 'Paste or type it here',
+    oninput: e => { ap.value = e.target.value },
+    onkeydown: e => {
+      if (e.key === 'Enter' && (!s.multiline || e.metaKey || e.ctrlKey)) { e.preventDefault(); answer(item, s.default) }
+    },
+  })
+  el.value = ap.value
+  return el
+}
+
 const ASK_ICON = { key: 'key', unlock: 'shield', trash: 'x', eye: 'eye', shield: 'shield' }
 
 let askKey = ''
@@ -622,12 +647,7 @@ function renderAsk() {
       h('div', { class: 'asktext' },
         h('h2', { id: 'asktitle' }, s.title),
         askBody(s.body),
-        s.secure && paired() ? h('input', {
-          id: 'askval', class: 'field askval', type: 'password', autocomplete: 'off', spellcheck: 'false',
-          placeholder: 'Paste or type it here', value: ap.value,
-          oninput: e => { ap.value = e.target.value },
-          onkeydown: e => { if (e.key === 'Enter') { e.preventDefault(); answer(item, s.default) } },
-        }) : null,
+        s.secure && paired() ? secretField(item, s) : null,
         ap.err ? h('p', { class: 'askerr' }, ap.err) : null)),
     paired()
       ? h('div', { class: 'askfoot' }, s.buttons.map((b, i) => [

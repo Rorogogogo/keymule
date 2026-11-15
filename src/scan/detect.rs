@@ -93,6 +93,105 @@ static DB_URL: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// A PEM private key block, also inside JSON with `\n` escapes (a Google
+/// service account file).
+static PEM_KEY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?s)(-----BEGIN ((?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY)-----.+?-----END (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----)",
+    )
+    .unwrap()
+});
+
+/// An AWS secret access key: 40 characters of base64, named as one or next
+/// to an access key ID.
+static AWS_SECRET_NAMED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?i)(?:aws_?secret_?access_?key|secret[ _-]?access[ _-]?key|aws[ _-]?secret(?:[ _-]?key)?)["'`]?\s*(?:is|=|:)?\s*["'`]?([A-Za-z0-9/+]{40})(?:[^A-Za-z0-9/+=]|$)"#,
+    )
+    .unwrap()
+});
+static BASE64_40: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|[^A-Za-z0-9/+])([A-Za-z0-9/+]{40})(?:[^A-Za-z0-9/+=]|$)").unwrap()
+});
+
+/// A labelled password: "password: X", "pw is X", `DB_PASSWORD=X`,
+/// `"password": "X"`.
+static PASSWORD_LABEL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?i)\b(?:[a-z0-9_]*password|passwd|pwd|pw|pass|passcode|passphrase)\b["'`]?(?:\s+(?:for|of|to|on)\b[^\n:=]{1,40}?)?\s*(?:is|=|:|-)\s*["'`]?([^\s"'`]{6,64})"#,
+    )
+    .unwrap()
+});
+
+/// Words that follow "password is/:" in ordinary prose, not passwords.
+const NOT_PASSWORDS: &[&str] = &[
+    "required",
+    "incorrect",
+    "invalid",
+    "wrong",
+    "correct",
+    "missing",
+    "empty",
+    "expired",
+    "reset",
+    "changed",
+    "protected",
+    "optional",
+    "needed",
+    "hidden",
+    "masked",
+    "saved",
+    "stored",
+    "encrypted",
+    "hashed",
+    "secure",
+    "strong",
+    "weak",
+    "manager",
+    "field",
+    "please",
+    "should",
+    "must",
+    "the",
+    "your",
+    "same",
+    "different",
+    "below",
+    "above",
+    "unknown",
+    "forgotten",
+    "available",
+    "enabled",
+    "disabled",
+    "set",
+    "unset",
+    "none",
+    "null",
+];
+
+/// Whether a labelled value looks like a password, not a word of prose: at
+/// least three kinds of character (lower, upper, digit, symbol), or long and
+/// not a plain word.
+fn password_like(v: &str) -> bool {
+    let v = v.trim_end_matches(['.', ',', ';', ')', '!', '?']);
+    if v.len() < 6 || v.len() > 64 || v.starts_with(['$', '{', '<', '*']) || looks_fake(v) {
+        return false;
+    }
+    if NOT_PASSWORDS.contains(&v.to_ascii_lowercase().as_str()) {
+        return false;
+    }
+    let kinds = [
+        v.chars().any(|c| c.is_ascii_lowercase()),
+        v.chars().any(|c| c.is_ascii_uppercase()),
+        v.chars().any(|c| c.is_ascii_digit()),
+        v.chars().any(|c| !c.is_ascii_alphanumeric()),
+    ]
+    .iter()
+    .filter(|k| **k)
+    .count();
+    kinds >= 3 || (v.len() >= 10 && kinds >= 2 && !v.chars().all(|c| c.is_ascii_alphabetic()))
+}
+
 /// Preset-like id for database URLs: hook saves them as MCP server secrets.
 pub const DATABASE: &str = "database";
 
@@ -128,6 +227,52 @@ fn push(
 /// For prompts: prefixed tokens plus "my X token is ..." phrasing.
 pub fn scan(text: &str) -> Vec<Found> {
     let mut found = Vec::new();
+    for caps in PEM_KEY.captures_iter(text) {
+        let kind = caps[2].trim_end_matches("PRIVATE KEY").trim();
+        let what = if text.contains("service_account") {
+            "Google service account key".to_string()
+        } else if kind.is_empty() {
+            "private key".to_string()
+        } else {
+            format!("{} private key", kind.replace("OPENSSH", "SSH"))
+        };
+        push(&mut found, &caps[1], Some("private-key"), Some(what), true);
+    }
+    for caps in AWS_SECRET_NAMED.captures_iter(text) {
+        push(
+            &mut found,
+            &caps[1],
+            Some("aws"),
+            Some("AWS secret access key".into()),
+            true,
+        );
+    }
+    if text.contains("AKIA") {
+        for caps in BASE64_40.captures_iter(text) {
+            let v = &caps[1];
+            if looks_random(v) && v.chars().any(|c| c.is_ascii_digit()) {
+                push(
+                    &mut found,
+                    v,
+                    Some("aws"),
+                    Some("AWS secret access key".into()),
+                    true,
+                );
+            }
+        }
+    }
+    for caps in PASSWORD_LABEL.captures_iter(text) {
+        let v = caps[1].trim_end_matches(['.', ',', ';', ')', '!', '?']);
+        if password_like(v) {
+            push(
+                &mut found,
+                v,
+                Some("password"),
+                Some("password".into()),
+                true,
+            );
+        }
+    }
     for (re, svc, label) in PREFIXED.iter() {
         for caps in re.captures_iter(text) {
             let svc = svc.or_else(|| service_near(text));
@@ -314,6 +459,18 @@ fn shannon(s: &str) -> f64 {
         .sum()
 }
 
+/// Fake AWS keys for tests, put together at runtime so secret scanners
+/// (GitHub's push protection) don't take the source for a leak.
+#[cfg(test)]
+pub mod fake {
+    pub fn aws_id() -> String {
+        ["AKIA", "IOSFODNN7", "ABCDEFG"].concat()
+    }
+    pub fn aws_secret() -> String {
+        ["wJalrXUtnFEMI", "/K7MDENG/bPxRfiCYz", "ABCDEFK3x"].concat()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +572,68 @@ mod tests {
         let f = scan("my token is 8f3kd92mfa0q9w8e7r6t5y4u");
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].service, None);
+    }
+
+    #[test]
+    fn private_keys_are_caught_whole() {
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ\nAAAAMwAAAAtzc2gtZWQ\n-----END OPENSSH PRIVATE KEY-----";
+        let f = scan(&format!("here is my deploy key\n{pem}\nthanks"));
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].value, pem);
+        assert_eq!(f[0].label.as_deref(), Some("SSH private key"));
+
+        let json = r#"{"type": "service_account", "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----\n", "client_email": "x@y.iam.gserviceaccount.com"}"#;
+        let f = scan(json);
+        assert_eq!(f[0].label.as_deref(), Some("Google service account key"));
+        assert!(f[0].value.starts_with("-----BEGIN PRIVATE KEY-----"));
+        assert!(scan("-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----").is_empty());
+    }
+
+    #[test]
+    fn aws_secret_keys_are_caught() {
+        let secret = fake::aws_secret();
+        let id = fake::aws_id();
+        let f = scan(&format!("aws_secret_access_key = {secret}"));
+        assert!(
+            f.iter()
+                .any(|x| x.value == secret && x.label.as_deref() == Some("AWS secret access key"))
+        );
+        let f = scan(&format!("id {id} and {secret} for prod"));
+        assert!(f.iter().any(|x| x.value == secret), "{f:?}");
+        assert!(f.iter().any(|x| x.value == id));
+        // Without an access key ID, a lone 40-character string isn't assumed.
+        assert!(scan(&format!("commit {secret}")).is_empty());
+    }
+
+    #[test]
+    fn labelled_passwords_are_caught_and_prose_is_not() {
+        for (msg, pw) in [
+            ("the staging password is Tr0ub4dor&3", "Tr0ub4dor&3"),
+            ("login admin, password: Secr3t!x", "Secr3t!x"),
+            ("DB_PASSWORD=hunter2Rocks9", "hunter2Rocks9"),
+            (r#"{"user": "app", "password": "pa55-Word"}"#, "pa55-Word"),
+            ("pw is kX9!m2#Qp7", "kX9!m2#Qp7"),
+            (
+                "the password for our acme account is Tr0ub4dor&3x",
+                "Tr0ub4dor&3x",
+            ),
+        ] {
+            let f = scan(msg);
+            assert!(
+                f.iter()
+                    .any(|x| x.value == pw && x.label.as_deref() == Some("password")),
+                "{msg}: {f:?}"
+            );
+        }
+        for msg in [
+            "the password is required",
+            "password: please reset it tomorrow",
+            "password - the field below",
+            "set PASSWORD=$DB_PASS in the env",
+            "password is hunter",
+            "the password for the admin account is required",
+        ] {
+            assert!(scan(msg).is_empty(), "{msg}: {:?}", scan(msg));
+        }
     }
 }

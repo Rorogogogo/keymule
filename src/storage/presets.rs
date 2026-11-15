@@ -11,6 +11,21 @@ pub enum AuthKind {
     Header(&'static str),
 }
 
+/// What kind of secret a preset holds, which decides how it can be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// An API token keymule attaches to HTTP requests (and can hand to a CLI).
+    Http,
+    /// A password: only handed to a program, in an env var.
+    Password,
+    /// A private key (PEM): handed to a program as a temporary file, or in
+    /// an env var.
+    PrivateKey,
+    /// An AWS access key ID and secret, stored as two lines: handed to a
+    /// program as AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+    AwsKeys,
+}
+
 #[derive(Debug)]
 pub struct Preset {
     pub id: &'static str,
@@ -31,6 +46,7 @@ pub struct Preset {
     /// The env var the service's own CLI reads its token from, for
     /// `keymule exec <name> --env VAR -- <cli>`.
     pub cli_env: Option<(&'static str, &'static str)>,
+    pub kind: Kind,
 }
 
 pub const PRESETS: &[Preset] = &[
@@ -52,6 +68,7 @@ pub const PRESETS: &[Preset] = &[
                Queue a build: POST /rest/api/latest/queue/PROJ-PLAN.",
         extra_hosts: &[],
         cli_env: None,
+        kind: Kind::Http,
     },
     Preset {
         id: "github",
@@ -70,6 +87,7 @@ pub const PRESETS: &[Preset] = &[
                PRs: GET /repos/{owner}/{repo}/pulls?state=open.",
         extra_hosts: &["github.com", "uploads.github.com"],
         cli_env: Some(("GH_TOKEN", "gh")),
+        kind: Kind::Http,
     },
     Preset {
         id: "gitlab",
@@ -87,6 +105,7 @@ pub const PRESETS: &[Preset] = &[
                POST /projects/{id}/pipelines/{pipeline_id}/retry.",
         extra_hosts: &[],
         cli_env: Some(("GITLAB_TOKEN", "glab")),
+        kind: Kind::Http,
     },
     Preset {
         id: "jenkins",
@@ -104,6 +123,7 @@ pub const PRESETS: &[Preset] = &[
                Folders nest as /job/{folder}/job/{name}.",
         extra_hosts: &[],
         cli_env: None,
+        kind: Kind::Http,
     },
     Preset {
         id: "stripe",
@@ -123,6 +143,7 @@ pub const PRESETS: &[Preset] = &[
                Recent failures: GET /v1/events?type=invoice.payment_failed&limit=10.",
         extra_hosts: &[],
         cli_env: Some(("STRIPE_API_KEY", "stripe")),
+        kind: Kind::Http,
     },
     Preset {
         id: "openai",
@@ -137,6 +158,54 @@ pub const PRESETS: &[Preset] = &[
                Responses: POST /responses with {\"model\": \"...\", \"input\": \"...\"}.",
         extra_hosts: &[],
         cli_env: Some(("OPENAI_API_KEY", "openai")),
+        kind: Kind::Http,
+    },
+    Preset {
+        id: "password",
+        title: "Password",
+        default_url: None,
+        url_example: "",
+        auth: AuthKind::Bearer,
+        verify_path: None,
+        accept: "",
+        keywords: &[], // found by their own shape, not by words nearby
+        hint: "A password. It isn't for HTTP requests: hand it to a program with \
+               `keymule exec <name> --env VAR -- <command>` (e.g. --env PGPASSWORD -- psql …).",
+        extra_hosts: &[],
+        cli_env: None,
+        kind: Kind::Password,
+    },
+    Preset {
+        id: "private-key",
+        title: "Private key",
+        default_url: None,
+        url_example: "",
+        auth: AuthKind::Bearer,
+        verify_path: None,
+        accept: "",
+        keywords: &[], // found by their own shape, not by words nearby
+        hint: "A private key (PEM). Hand it to a program as a file with \
+               `keymule exec <name> --file KEY -- ssh -i {KEY} user@host`: keymule writes it to a \
+               temporary file only you can read, puts that file's path where {KEY} is (and in \
+               the KEY env var), and deletes it when the program ends.",
+        extra_hosts: &[],
+        cli_env: None,
+        kind: Kind::PrivateKey,
+    },
+    Preset {
+        id: "aws",
+        title: "AWS access keys",
+        default_url: None,
+        url_example: "",
+        auth: AuthKind::Bearer,
+        verify_path: None,
+        accept: "",
+        keywords: &[], // found by their own shape, not by words nearby
+        hint: "An AWS access key ID and secret. `keymule exec <name> -- aws s3 ls` (or any AWS \
+               tool) gets AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.",
+        extra_hosts: &[],
+        cli_env: None,
+        kind: Kind::AwsKeys,
     },
     Preset {
         id: "generic",
@@ -150,6 +219,7 @@ pub const PRESETS: &[Preset] = &[
         hint: "",
         extra_hosts: &[],
         cli_env: None,
+        kind: Kind::Http,
     },
 ];
 
