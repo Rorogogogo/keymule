@@ -168,7 +168,7 @@ up next to itself as `<name>.keymule-bak`.
 | `keymule gh-secret --repo O/R SECRET=name… [--via gh\|gh:LOGIN\|CRED] [--dry-run]` | Copy credentials into GitHub Actions secrets for CI, all in one dialog: encrypted with the repo's key, uploaded as the account `gh` is signed in as (or a stored GitHub credential) after keymule checks it has admin on the repo |
 | `keymule allow [--dir D] [--off [--everywhere]] [--status]` | Allow all: one dialog (Cancel / Today / Always), then keymule stops asking in this repo (or `--dir ~` for every folder) (any program including shells, gh-secret, new hosts, reveal, the read-back guard, pasted secrets saved without asking). Deleting still asks; every skipped dialog is logged |
 | `keymule remote <name> <url> [--header "Name: value"]` | Connect to a remote (HTTP) MCP server, adding the headers keymule holds (used in configs). New URLs need your approval once |
-| `keymule ui [--no-open] [--port N]` | Open the local web page (127.0.0.1 only, token in the link it opens) |
+| `keymule ui [--no-open] [--port N]` | Open the local web page (127.0.0.1 only, port 7420 by default, token in the link it opens). Without a screen, keymule's questions wait there for a paired browser |
 | `keymule menubar [--background] [--login on\|off]` | keymule in the macOS menu bar: its page in its own window (no browser), with a Dock icon while the window is open. `keymule ui` opens that window when it's running |
 | `keymule init [--dry-run]` | Set up every agent found (see [Agents](#agents)). On macOS it also puts keymule in the menu bar and makes it start at login (first setup only). The first time, it also offers allow-all for your home folder, with Always preselected |
 | `keymule mcp` | The MCP server (started by your agent) |
@@ -261,6 +261,32 @@ keymule saves the secret and hands the message back, ready to send again without
 
 ---
 
+## 🐧 Linux and dev containers
+
+Where there's no screen for keymule's popups (Linux, a dev container, a machine over SSH), its
+questions wait in the keymule page instead, and you answer them from your browser:
+
+```sh
+export KEYMULE_PASSPHRASE=…        # no system keychain in a container: unlock the vault with a passphrase
+keymule ui --no-open                # in your own terminal; prints the page link and a pairing code
+```
+
+Forward port 7420 to your Mac (VS Code does it from the Ports panel), open the link it printed,
+and click **Pair this browser** with the code. From then on, when an agent needs your OK or a new
+secret, the question appears on the page: Allow, Cancel, Today / Always for allow-all, or a field
+to type the secret into.
+
+- **Only your browser can answer.** Pairing makes a key pair inside the browser (its private half
+  can't be read out); every answer is signed with it, and keymule checks the signature. Something
+  that can call the page's server or write keymule's files, an agent included, can't answer for
+  you. A second browser can only pair after an already paired one allows it.
+- **Typed secrets are encrypted** to the keymule process that asked, so they never sit in a file
+  in the clear.
+- **The limit:** in a container the vault's key is the passphrase in the environment, which the
+  agent can read too. So an agent that deliberately decrypts the vault itself can get at the
+  secrets. Page approvals guard keymule's own ways of using them, the same trade-off as allow-all.
+- On a Mac, `KEYMULE_APPROVALS=page` sends questions to the page instead of popups.
+
 ## 🧱 How it's stored
 
 | What | Where |
@@ -284,7 +310,7 @@ time they're used, or all at once with `keymule migrate`.
 - A Claude Code hook can't edit a message, only stop it, so the paste hook holds the message in the keychain for up to 15 minutes until you answer `y` or `n`, and then hands it to the agent with your answer.
 - Paste detection is reliable for prefixed tokens (`ghp_`, `github_pat_`, `glpat-`, `sk-`, `AKIA`…) and database URLs with a password. Unprefixed tokens such as Bamboo's are caught when the message gives context ("my bamboo token is …"). Default passwords like `postgres:postgres@localhost` pass through.
 - HTTP APIs only. Database, SSH and cloud CLI credentials are on the roadmap.
-- The secure dialog is macOS-only for now; elsewhere use `keymule add` in a terminal.
+- Popups are macOS-only; elsewhere questions wait in the keymule page (see [Linux and dev containers](#-linux-and-dev-containers)). Revealing a value needs a Mac screen.
 - The agent picks the URL in `add_credential`, so read the host in the dialog before typing your token.
 - Unsigned builds make macOS ask for access to the vault key again after each rebuild (once, not once per secret). Building from source on a Mac, `scripts/install-macos.sh` signs the binary with a local certificate so "Always Allow" sticks (setup steps are in the script).
 - `keymule ui` never sees a secret, but anything that can read your terminal output can open it with the link it prints.

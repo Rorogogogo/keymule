@@ -6,6 +6,10 @@
 //! literal on stdin, never as script source or a command-line argument, and
 //! the page sets it with textContent, so names and URLs chosen by an agent
 //! can't inject code, and other processes can't read it.
+//!
+//! Where there's no screen (Linux, a dev container) or with
+//! `KEYMULE_APPROVALS=page`, the same questions wait in the keymule page
+//! instead, answered from a paired browser (see [`crate::approvals`]).
 
 use anyhow::Result;
 
@@ -18,8 +22,7 @@ pub enum Answer {
     TimedOut,
 }
 
-#[cfg(target_os = "macos")]
-const TIMEOUT_SECS: u32 = 180;
+pub const TIMEOUT_SECS: u32 = 180;
 
 #[cfg(target_os = "macos")]
 const SCRIPT: &str = include_str!("dialog.js");
@@ -29,9 +32,8 @@ const PAGE: &str = include_str!("dialog.html");
 
 /// What a dialog shows. `message` is split into a bold headline (its first
 /// paragraph) and the text below; lines indented by 8 spaces show as code.
-#[cfg(target_os = "macos")]
 #[derive(serde::Serialize)]
-struct Spec<'a> {
+pub struct Spec<'a> {
     title: &'a str,
     body: &'a str,
     /// "key", "unlock", "trash", "eye" or "shield".
@@ -39,7 +41,7 @@ struct Spec<'a> {
     /// "" (the accent colour), "warn" or "bad".
     tone: &'a str,
     /// Left to right.
-    buttons: &'a [&'a str],
+    pub buttons: &'a [&'a str],
     /// The filled button.
     primary: &'a str,
     /// Return presses it.
@@ -48,11 +50,10 @@ struct Spec<'a> {
     cancel: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     destructive: Option<&'a str>,
-    secure: bool,
-    timeout: u32,
+    pub secure: bool,
+    pub timeout: u32,
 }
 
-#[cfg(target_os = "macos")]
 impl<'a> Spec<'a> {
     /// Buttons left to right: the first cancels and is the default, the
     /// last is filled.
@@ -74,12 +75,34 @@ impl<'a> Spec<'a> {
     }
 }
 
-#[cfg(target_os = "macos")]
+/// What the user picked, and what they typed in a secure field.
 #[derive(Debug, serde::Deserialize)]
-struct Picked {
-    button: String,
+pub struct Picked {
+    pub button: String,
     #[serde(default)]
-    text: Option<String>,
+    pub text: Option<String>,
+}
+
+/// Whether questions go to the keymule page instead of a popup: always
+/// where there's no macOS screen, and on a Mac with
+/// `KEYMULE_APPROVALS=page`.
+pub fn page_mode() -> bool {
+    match std::env::var("KEYMULE_APPROVALS").as_deref() {
+        Ok("page") => true,
+        Ok("popup") => false,
+        _ => !cfg!(target_os = "macos"),
+    }
+}
+
+/// Ask, by popup or in the page. None if nobody answered in time.
+fn ask(spec: &Spec) -> Result<Option<Picked>> {
+    if page_mode() {
+        return crate::approvals::ask(spec);
+    }
+    #[cfg(target_os = "macos")]
+    return alert(spec);
+    #[cfg(not(target_os = "macos"))]
+    crate::approvals::ask(spec)
 }
 
 /// Show the alert and wait. None if nobody answered in time.
@@ -116,10 +139,21 @@ fn alert(spec: &Spec) -> Result<Option<Picked>> {
     }
 }
 
+/// Ask on this Mac's screen even in page mode (pairing the first browser).
+pub fn confirm_on_screen(message: &str) -> Result<bool> {
+    if let Some(a) = test_answer(message) {
+        return Ok(a == "allow");
+    }
+    #[cfg(target_os = "macos")]
+    return Ok(alert(&Spec::new(message, "key", "", &["Cancel", "Pair"]))?
+        .is_some_and(|p| p.button == "Pair"));
+    #[cfg(not(target_os = "macos"))]
+    anyhow::bail!("no screen here; use the code `keymule ui` printed")
+}
+
 /// The button the user clicked, "" if the dialog timed out.
-#[cfg(target_os = "macos")]
 fn pick(spec: &Spec) -> Result<String> {
-    Ok(alert(spec)?.map(|p| p.button).unwrap_or_default())
+    Ok(ask(spec)?.map(|p| p.button).unwrap_or_default())
 }
 
 /// Debug builds only: `KEYMULE_TEST_DIALOG` answers dialogs ("cancel",
@@ -166,18 +200,12 @@ pub fn confirm_delete(message: &str) -> Result<bool> {
     platform_confirm_delete(message)
 }
 
-#[cfg(target_os = "macos")]
 fn platform_confirm_delete(message: &str) -> Result<bool> {
     let spec = Spec {
         destructive: Some("Delete"),
         ..Spec::new(message, "trash", "bad", &["Cancel", "Delete"])
     };
     Ok(pick(&spec)? == "Delete")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn platform_confirm_delete(_message: &str) -> Result<bool> {
-    anyhow::bail!("the confirmation dialog is macOS-only for now; run `keymule rm` in a terminal")
 }
 
 /// Ask the user to allow something. Return and Escape both cancel.
@@ -203,7 +231,6 @@ pub fn allow_all(message: &str) -> Result<Option<crate::trust::Span>> {
     })
 }
 
-#[cfg(target_os = "macos")]
 fn platform_allow_all(message: &str) -> Result<String> {
     // Return picks Always: the user asked for this switch.
     let spec = Spec {
@@ -211,11 +238,6 @@ fn platform_allow_all(message: &str) -> Result<String> {
         ..Spec::new(message, "unlock", "warn", &["Cancel", "Today", "Always"])
     };
     pick(&spec)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn platform_allow_all(_message: &str) -> Result<String> {
-    anyhow::bail!("the allow-all dialog is macOS-only for now")
 }
 
 /// What to do with a message that has a secret in it.
@@ -242,7 +264,6 @@ pub fn paste_choice(message: &str) -> Option<PasteChoice> {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn platform_paste_choice(message: &str) -> Result<String> {
     let spec = Spec {
         default: "Save",
@@ -254,11 +275,6 @@ fn platform_paste_choice(message: &str) -> Result<String> {
         )
     };
     pick(&spec)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn platform_paste_choice(_message: &str) -> Result<String> {
-    anyhow::bail!("no dialog here")
 }
 
 /// Show stored values on screen, after the user agrees to it. Returns false
@@ -286,6 +302,11 @@ pub fn reveal(
         let _ = test_answer(&shown);
         return Ok(true);
     }
+    if page_mode() {
+        anyhow::bail!(
+            "showing a secret needs this machine's screen; the keymule page doesn't show values"
+        );
+    }
     if ask && !platform_ask_reveal(&question)? {
         return Ok(false);
     }
@@ -293,7 +314,6 @@ pub fn reveal(
     Ok(true)
 }
 
-#[cfg(target_os = "macos")]
 fn platform_ask_reveal(message: &str) -> Result<bool> {
     Ok(pick(&Spec::new(message, "eye", "warn", &["Cancel", "Show"]))? == "Show")
 }
@@ -383,16 +403,10 @@ fn platform_show(name: &str, items: &[(String, String)], copy: Option<&str>) -> 
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_ask_reveal(_message: &str) -> Result<bool> {
-    anyhow::bail!("revealing a secret is macOS-only for now")
-}
-
-#[cfg(not(target_os = "macos"))]
 fn platform_show(_name: &str, _items: &[(String, String)], _copy: Option<&str>) -> Result<()> {
-    anyhow::bail!("revealing a secret is macOS-only for now")
+    anyhow::bail!("showing a secret needs a macOS screen")
 }
 
-#[cfg(target_os = "macos")]
 fn platform_secret(message: &str) -> Result<Answer> {
     let spec = Spec {
         default: "Save",
@@ -400,7 +414,7 @@ fn platform_secret(message: &str) -> Result<Answer> {
         secure: true,
         ..Spec::new(message, "key", "", &["Cancel", "Save"])
     };
-    Ok(match alert(&spec)? {
+    Ok(match ask(&spec)? {
         None => Answer::TimedOut,
         Some(p) if p.button != "Save" => Answer::Cancelled,
         Some(p) => match p.text.unwrap_or_default().trim() {
@@ -410,19 +424,8 @@ fn platform_secret(message: &str) -> Result<Answer> {
     })
 }
 
-#[cfg(target_os = "macos")]
 fn platform_confirm(message: &str) -> Result<bool> {
     Ok(pick(&Spec::new(message, "key", "", &["Cancel", "Allow"]))? == "Allow")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn platform_secret(_message: &str) -> Result<Answer> {
-    anyhow::bail!("the secure dialog is macOS-only for now; run `keymule add` in a terminal")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn platform_confirm(_message: &str) -> Result<bool> {
-    anyhow::bail!("the confirmation dialog is macOS-only for now; run `keymule edit` in a terminal")
 }
 
 #[cfg(all(test, target_os = "macos"))]

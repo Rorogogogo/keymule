@@ -388,7 +388,13 @@ function renderLeaks() {
 }
 
 // Audit lines that aren't HTTP requests: what to call them.
-const EVENTS = { START: 'Started', EXEC: 'Ran', INSTALL: 'Copied to git', UNINSTALL: 'Removed from git' }
+const EVENTS = {
+  START: 'Started', EXEC: 'Ran', INSTALL: 'Copied to git', UNINSTALL: 'Removed from git',
+  'GH-SECRET': 'Copied to GitHub', 'AUTO-ALLOW': 'Allowed', 'ALLOW-ALL-ON': 'Allow all on',
+  'ALLOW-ALL-OFF': 'Allow all off', PAIR: 'Paired', 'BAD-APPROVAL': 'Refused',
+}
+// keymule's own events have no credential: show them as keymule's.
+const actName = a => (a.name === '-' ? 'keymule' : a.name)
 
 function renderActivity() {
   const f = state.filter
@@ -400,9 +406,9 @@ function renderActivity() {
     const shown = a.method === 'REVEAL'
     const ok = a.status >= 200 && a.status < 300
     return h('div', { class: 'act' },
-      h('span', { class: 'name', onclick: () => toggleFilter(a.name), title: 'Show only its activity' }, a.name),
+      h('span', { class: 'name', onclick: () => toggleFilter(a.name), title: 'Show only its activity' }, actName(a)),
       h('span', { class: 'req', title: a.url }, h('span', { class: 'm' }, a.method), h('span', { class: 'u' }, shown ? 'shown to you in a keymule window' : a.url)),
-      h('span', { class: 'st' }, event ? badge(event) : shown ? badge('Revealed', 'warn') : badge(a.status || '—', ok ? 'ok' : 'bad')),
+      h('span', { class: 'st' }, event ? badge(event, a.method === 'BAD-APPROVAL' ? 'bad' : '') : shown ? badge('Revealed', 'warn') : badge(a.status || '—', ok ? 'ok' : 'bad')),
       h('span', { class: 'when' }, when(a.ts)))
   })
   if (all.length > rows.length) rows.push(h('button', { class: 'more', type: 'button', onclick: () => { state.showAllAct = true; render() } }, `Show ${all.length - rows.length} more`))
@@ -467,3 +473,216 @@ setInterval(async () => {
   render()
 }, 3000)
 setInterval(loadPlan, 60000)
+
+// ---- questions keymule asks here (no screen for a popup) ----------------------
+//
+// Each browser makes its own key pair (the private half can't be read out,
+// even by this page) and keeps it in IndexedDB. Pairing hands keymule the
+// public half; every answer is signed with the private one, so nothing else
+// can answer for you. A typed secret is encrypted to the asking process.
+
+const ap = { pending: [], devices: [], pageMode: false, me: null, live: false, busy: false, err: '', value: '' }
+
+const enc = s => new TextEncoder().encode(s)
+const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)))
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0))
+const hexOf = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('')
+const sha256 = data => crypto.subtle.digest('SHA-256', typeof data === 'string' ? enc(data) : data)
+
+function idb(mode, fn) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open('keymule', 1)
+    open.onupgradeneeded = () => open.result.createObjectStore('device')
+    open.onerror = () => reject(open.error)
+    open.onsuccess = () => {
+      const tx = open.result.transaction('device', mode)
+      const req = fn(tx.objectStore('device'))
+      req.onsuccess = () => resolve(req.result)
+      req.onerror = () => reject(req.error)
+    }
+  })
+}
+
+async function myDevice() {
+  if (ap.me) return ap.me
+  let d = await idb('readonly', s => s.get('me')).catch(() => null)
+  if (!d) {
+    const keyPair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify'])
+    const raw = await crypto.subtle.exportKey('raw', keyPair.publicKey)
+    d = { keyPair, pub: b64(raw), id: hexOf((await sha256(raw)).slice(0, 8)) }
+    await idb('readwrite', s => s.put(d, 'me'))
+  }
+  ap.me = d
+  return d
+}
+
+function browserName() {
+  const ua = navigator.userAgent
+  const b = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Browser'
+  const os = /Mac OS X/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : ''
+  return os ? `${b} on ${os}` : b
+}
+
+const paired = () => !!ap.me && ap.devices.some(d => d.id === ap.me.id)
+
+async function loadApprovals() {
+  try {
+    const r = await api('/api/approvals')
+    ap.pending = (r.pending || []).map(raw => ({ raw, req: JSON.parse(raw) }))
+    ap.devices = r.devices || []
+    ap.pageMode = !!r.page_mode
+    ap.live = true
+    if (ap.pageMode || ap.devices.length) await myDevice()
+  } catch {
+    ap.live = false
+  }
+  renderApprovals()
+}
+
+async function pairThis(code) {
+  ap.busy = true; ap.err = ''; renderApprovals()
+  try {
+    const d = await myDevice()
+    const r = await api('/api/pair', { name: browserName(), key: d.pub, code })
+    if (!r.ok) ap.err = r.stderr || 'Pairing failed'
+    else toast('This browser now answers keymule’s questions', 'ok')
+  } catch (e) {
+    ap.err = e.message
+  }
+  ap.busy = false
+  await loadApprovals()
+}
+
+async function sealSecret(req, value) {
+  const asker = await crypto.subtle.importKey('raw', unb64(req.epk), { name: 'ECDH', namedCurve: 'P-256' }, false, [])
+  const eph = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits'])
+  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: asker }, eph.privateKey, 256))
+  const prefix = enc(`keymule-secret-v1\n${req.id}\n`)
+  const both = new Uint8Array(prefix.length + bits.length)
+  both.set(prefix); both.set(bits, prefix.length)
+  const aes = await crypto.subtle.importKey('raw', await sha256(both), 'AES-GCM', false, ['encrypt'])
+  const iv = crypto.getRandomValues(new Uint8Array(12))
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aes, enc(value))
+  return { epk: b64(await crypto.subtle.exportKey('raw', eph.publicKey)), iv: b64(iv), ct: b64(ct) }
+}
+
+async function answer(item, button) {
+  const { req, raw } = item
+  const s = req.spec
+  ap.busy = true; ap.err = ''; renderApprovals()
+  try {
+    const d = await myDevice()
+    let secret = null
+    if (s.secure && button !== s.cancel) {
+      if (!ap.value.trim()) { ap.err = 'Type the secret first'; ap.busy = false; renderApprovals(); return }
+      secret = await sealSecret(req, ap.value)
+    }
+    const sec = secret ? hexOf(await sha256(`${secret.epk}.${secret.iv}.${secret.ct}`)) : ''
+    const msg = `keymule-approval-v1\n${req.id}\n${hexOf(await sha256(raw))}\n${button}\n${sec}`
+    const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, d.keyPair.privateKey, enc(msg))
+    const r = await api('/api/approvals/answer', { id: req.id, reply: { button, device: d.id, sig: b64(sig), secret } })
+    if (!r.ok) ap.err = r.stderr || 'That didn’t go through'
+    else { ap.value = ''; ap.pending = ap.pending.filter(p => p.req.id !== req.id) }
+  } catch (e) {
+    ap.err = e.message
+  }
+  ap.busy = false
+  renderApprovals()
+}
+
+// The question, laid out like keymule's popup: headline, text, code boxes.
+function askBody(body) {
+  const paras = (body || '').split(/\n\n+/).filter(p => p.trim())
+  return paras.map((p, i) => {
+    const lines = p.split('\n')
+    if (lines.every(l => l.startsWith('        '))) return h('pre', { class: 'askcode' }, lines.map(l => l.slice(8)).join('\n'))
+    const next = paras[i + 1]
+    const label = next && next.split('\n').every(l => l.startsWith('        ')) && p.length < 60
+    return h('p', { class: label ? 'asklabel' : null }, p)
+  })
+}
+
+const ASK_ICON = { key: 'key', unlock: 'shield', trash: 'x', eye: 'eye', shield: 'shield' }
+
+let askKey = ''
+function renderAsk() {
+  const wrap = $('ask')
+  const item = ap.pending[0]
+  // Redraw only when something changed: a redraw mid-click would lose it.
+  const key = item && ap.live ? [item.req.id, ap.pending.length, ap.err, ap.busy, paired()].join('|') : ''
+  if (key === askKey) return
+  askKey = key
+  if (!key) { wrap.hidden = true; wrap.replaceChildren(); return }
+  const s = item.req.spec
+  const focusHad = document.activeElement && document.activeElement.id === 'askval'
+  const card = h('div', { class: `ask ${s.tone || ''}`, role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'asktitle' },
+    h('div', { class: 'askbrand' }, 'keymule asks', ap.pending.length > 1 ? h('span', { class: 'askmore' }, `+${ap.pending.length - 1} more`) : null),
+    h('div', { class: 'askmain' },
+      h('div', { class: 'askicon' }, icon(ASK_ICON[s.icon] || 'key')),
+      h('div', { class: 'asktext' },
+        h('h2', { id: 'asktitle' }, s.title),
+        askBody(s.body),
+        s.secure && paired() ? h('input', {
+          id: 'askval', class: 'field askval', type: 'password', autocomplete: 'off', spellcheck: 'false',
+          placeholder: 'Paste or type it here', value: ap.value,
+          oninput: e => { ap.value = e.target.value },
+          onkeydown: e => { if (e.key === 'Enter') { e.preventDefault(); answer(item, s.default) } },
+        }) : null,
+        ap.err ? h('p', { class: 'askerr' }, ap.err) : null)),
+    paired()
+      ? h('div', { class: 'askfoot' }, s.buttons.map((b, i) => [
+          h('button', {
+            class: `btn${b === s.destructive ? ' danger-fill' : b === s.primary ? ' primary' : ''}`,
+            type: 'button', disabled: ap.busy, 'data-default': b === s.default ? '1' : null,
+            onclick: () => answer(item, b),
+          }, b),
+          i === 0 && s.buttons.length > 2 ? h('span', { class: 'grow' }) : null,
+        ]))
+      : h('div', { class: 'askfoot' }, h('span', { class: 'note' }, 'Pair this browser (above) to answer.')))
+  wrap.replaceChildren(card)
+  wrap.hidden = false
+  const val = $('askval')
+  if (val && (focusHad || !wrap.dataset.shown || wrap.dataset.shown !== item.req.id)) val.focus()
+  else if (!val && wrap.dataset.shown !== item.req.id) wrap.querySelector('[data-default]')?.focus()
+  wrap.dataset.shown = item.req.id
+}
+
+let pairKey = ''
+function renderPairing() {
+  const el = $('pairing')
+  const show = ap.live && (ap.pageMode || ap.devices.length) && !paired()
+  const first = ap.devices.length === 0
+  const key = show ? [first, ap.busy, ap.pending.length ? '' : ap.err].join('|') : ''
+  if (key === pairKey) return
+  pairKey = key
+  if (!show) { el.replaceChildren(); return }
+  const input = first ? h('input', { id: 'paircode', class: 'field paircode', inputmode: 'numeric', placeholder: '123-456', 'aria-label': 'Pairing code' }) : null
+  const go = () => pairThis(first ? ($('paircode')?.value || '') : '')
+  el.replaceChildren(h('div', { class: 'pairing' },
+    h('div', { class: 'pairtext' },
+      h('strong', null, 'Answer keymule’s questions here'),
+      h('span', null, first
+        ? 'There’s no screen for keymule’s popups on this machine. Pair this browser with the code `keymule ui` printed in its terminal.'
+        : 'Another browser is already paired. Pairing this one asks there first.')),
+    h('div', { class: 'pairgo' },
+      input,
+      h('button', { class: 'btn primary', type: 'button', disabled: ap.busy, onclick: go }, ap.busy ? 'Pairing…' : 'Pair this browser')),
+    ap.err && !ap.pending.length ? h('p', { class: 'askerr' }, ap.err) : null))
+  if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') go() })
+}
+
+function renderApprovals() {
+  renderPairing()
+  renderAsk()
+}
+
+document.addEventListener('keydown', e => {
+  const item = ap.pending[0]
+  if (e.key === 'Escape' && item && paired() && !$('ask').hidden && !ap.busy) {
+    e.preventDefault()
+    answer(item, item.req.spec.cancel)
+  }
+})
+
+loadApprovals()
+setInterval(loadApprovals, 1000)
