@@ -63,7 +63,9 @@ pub struct InstallArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddArgs {
-    /// Service preset: bamboo, github, gitlab, jenkins or generic.
+    /// Service preset: bamboo, github, gitlab, jenkins, stripe, openai or generic for an
+    /// HTTP API token; password, private-key or aws for secrets that are only handed to
+    /// programs through `keymule exec` (no URL needed).
     pub service: String,
     /// Base URL of the API, e.g. "https://bamboo.yourcompany.com". Not needed for github.com or gitlab.com.
     #[serde(default)]
@@ -120,6 +122,22 @@ pub struct McpSecretArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SaveHeldArgs {
+    /// The held secret's id, from keymule's note or list_credentials.
+    pub id: String,
+    /// The name the user picked (lowercase with hyphens, service first, e.g. github-homebrew-tap).
+    pub name: String,
+    /// What it's for, in a line, so a later agent picks the right one.
+    pub description: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HeldIdArgs {
+    /// The held secret's id.
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct UpdateArgs {
     /// Credential name from list_credentials.
     pub name: String,
@@ -141,7 +159,11 @@ fn done(result: anyhow::Result<String>) -> CallToolResult {
 }
 
 async fn ask_secret(message: String) -> anyhow::Result<String> {
-    match tokio::task::spawn_blocking(move || dialog::secret(&message)).await?? {
+    ask_secret_with(message, false).await
+}
+
+async fn ask_secret_with(message: String, multiline: bool) -> anyhow::Result<String> {
+    match tokio::task::spawn_blocking(move || dialog::secret_with(&message, multiline)).await?? {
         Answer::Text(s) => Ok(s),
         Answer::Cancelled => bail!("The user cancelled the dialog. Nothing was saved."),
         Answer::TimedOut => bail!("The dialog timed out after 3 minutes. Nothing was saved."),
@@ -175,6 +197,101 @@ async fn check(
 }
 
 /// Also used by `keymule add --dialog`.
+/// What to ask for, and whether the field takes several lines, for a
+/// secret that isn't an HTTP token.
+fn other_kind_prompt(preset: &presets::Preset, name: &str) -> (String, bool) {
+    match preset.kind {
+        presets::Kind::PrivateKey => (
+            format!(
+                "Paste the private key for \"{name}\"\n\nThe whole block, from -----BEGIN to -----END. \
+                 It's only ever handed to programs you approve, as a file only you can read."
+            ),
+            true,
+        ),
+        presets::Kind::AwsKeys => (
+            format!(
+                "Paste the AWS keys for \"{name}\"\n\nThe access key ID on the first line, the \
+                 secret access key on the second."
+            ),
+            true,
+        ),
+        _ => (
+            format!(
+                "Type the password for \"{name}\"\n\nIt's only ever handed to programs you approve."
+            ),
+            false,
+        ),
+    }
+}
+
+/// Check a pasted private key or AWS key pair looks right; returns it tidied.
+pub fn check_other_kind(kind: presets::Kind, secret: &str) -> anyhow::Result<String> {
+    let secret = secret.trim().replace("\r\n", "\n");
+    match kind {
+        presets::Kind::PrivateKey => {
+            if !(secret.starts_with("-----BEGIN") && secret.contains("PRIVATE KEY-----")) {
+                bail!(
+                    "that doesn't look like a private key (it should start with -----BEGIN … PRIVATE KEY-----)"
+                );
+            }
+            Ok(secret)
+        }
+        presets::Kind::AwsKeys => {
+            let lines: Vec<&str> = secret
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            match lines.as_slice() {
+                [id, key]
+                    if (id.starts_with("AKIA") || id.starts_with("ASIA")) && key.len() >= 30 =>
+                {
+                    Ok(format!("{id}\n{key}"))
+                }
+                _ => bail!(
+                    "paste the access key ID (AKIA…) on the first line and the secret access key on the second"
+                ),
+            }
+        }
+        _ => Ok(secret),
+    }
+}
+
+/// Add a password, private key or AWS key pair: no URL, no hosts; it's only
+/// handed to programs through `keymule exec`.
+async fn add_other_kind(
+    name: String,
+    preset: &'static presets::Preset,
+    description: Option<String>,
+) -> anyhow::Result<String> {
+    let (message, multiline) = other_kind_prompt(preset, &name);
+    let secret = check_other_kind(preset.kind, &ask_secret_with(message, multiline).await?)?;
+    let cred = Credential {
+        service: preset.id.into(),
+        url: String::new(),
+        description: description.unwrap_or_default(),
+        auth: Auth::Bearer,
+        hosts: vec![],
+        added_by: "mcp".into(),
+    };
+    let mut store = Store::load()?;
+    if store.creds.contains_key(&name) {
+        bail!("\"{name}\" was added meanwhile; nothing changed");
+    }
+    let vault = store::vault();
+    Sealed::new(secret, &cred).save(vault.as_ref(), &name)?;
+    store.creds.insert(name.clone(), cred);
+    if let Err(e) = store.save() {
+        let _ = vault.delete(&name);
+        return Err(e);
+    }
+    Ok(format!(
+        "Saved \"{name}\" ({}). {}",
+        preset.title,
+        preset.hint.replace("<name>", &name)
+    ))
+}
+
 pub async fn add_with_dialog(a: AddArgs) -> anyhow::Result<String> {
     add(a).await
 }
@@ -200,6 +317,9 @@ async fn add(a: AddArgs) -> anyhow::Result<String> {
         bail!(
             "\"{name}\" already exists. Use rotate_credential to replace its secret, or choose another name."
         );
+    }
+    if preset.kind != presets::Kind::Http {
+        return add_other_kind(name, preset, a.description).await;
     }
     let url = a
         .url
@@ -261,18 +381,26 @@ async fn load_sealed(name: &str) -> anyhow::Result<Sealed> {
 async fn rotate(a: RotateArgs) -> anyhow::Result<String> {
     let mut sealed = load_sealed(&a.name).await?;
     let cred = sealed.apply(Store::load()?.get(&a.name)?);
-    let title = presets::get_or_generic(&cred.service).title;
+    let preset = presets::get_or_generic(&cred.service);
+    let title = preset.title;
     let hosts = if cred.hosts.is_empty() {
         "(no host set yet)".to_string()
     } else {
         cred.hosts.join(", ")
     };
-    let secret = ask_secret(format!(
-        "Paste the new {title} token for \"{}\"\n\nIt will only be sent to:\n\n        {hosts}",
-        a.name
-    ))
-    .await?;
-    let note = check(&a.name, &cred, &secret, a.verify.unwrap_or(true)).await?;
+    let (secret, note) = if preset.kind == presets::Kind::Http {
+        let secret = ask_secret(format!(
+            "Paste the new {title} token for \"{}\"\n\nIt will only be sent to:\n\n        {hosts}",
+            a.name
+        ))
+        .await?;
+        let note = check(&a.name, &cred, &secret, a.verify.unwrap_or(true)).await?;
+        (secret, note)
+    } else {
+        let (message, multiline) = other_kind_prompt(preset, &a.name);
+        let secret = check_other_kind(preset.kind, &ask_secret_with(message, multiline).await?)?;
+        (secret, String::new())
+    };
     sealed.secret = secret;
     sealed.save(store::vault().as_ref(), &a.name)?;
     let synced = tokio::task::spawn_blocking(move || {
@@ -511,7 +639,12 @@ impl Server {
         })
         .await
         .unwrap_or_default();
-        if store.creds.is_empty() && store.servers.is_empty() {
+        let none_held = tokio::task::spawn_blocking(|| {
+            crate::hook::list_held(store::vault().as_ref()).is_empty()
+        })
+        .await
+        .unwrap_or(true);
+        if store.creds.is_empty() && store.servers.is_empty() && none_held {
             return Ok(text(
                 "No credentials stored yet. Use add_credential (services: bamboo, github, gitlab, \
                  jenkins, generic); the user types the secret into a secure dialog.",
@@ -582,7 +715,15 @@ impl Server {
                 })
             })
             .collect();
-        let out = serde_json::json!({ "credentials": list, "mcp_server_secrets": servers });
+        let held = tokio::task::spawn_blocking(|| crate::hook::list_held(store::vault().as_ref()))
+            .await
+            .unwrap_or_default();
+        let mut out = serde_json::json!({ "credentials": list, "mcp_server_secrets": servers });
+        if !held.is_empty() {
+            // Secrets from the user's messages that still need a name: ask
+            // the user, then save_held (or discard_held).
+            out["held_waiting_for_a_name"] = serde_json::Value::Array(held);
+        }
         Ok(text(serde_json::to_string_pretty(&out).unwrap_or_default()))
     }
 
@@ -625,7 +766,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Store a new credential. keymule opens a secure dialog on the user's screen where they type the token; you never see it. It is verified against the service and then locked to the URL's host. Ask the user for the base URL first if the service needs one."
+        description = "Store a new credential. keymule opens a secure dialog on the user's screen where they type it; you never see it. An HTTP API token is verified against the service and locked to the URL's host (ask the user for the base URL first if the service needs one). A password, private key (service private-key: the dialog takes several lines) or AWS key pair (service aws) needs no URL; it's only handed to programs with keymule exec."
     )]
     async fn add_credential(
         &self,
@@ -652,6 +793,46 @@ impl Server {
         Parameters(args): Parameters<McpSecretArgs>,
     ) -> Result<CallToolResult, McpError> {
         Ok(done(add_mcp_secret(args).await))
+    }
+
+    #[tool(
+        description = "Save a secret keymule is holding from the user's message, under the name the user picked. Call it only after asking the user (offer two or three names that fit the conversation plus \"Don't save it\"; they can type their own). You never see the value."
+    )]
+    async fn save_held(
+        &self,
+        Parameters(a): Parameters<SaveHeldArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = tokio::task::spawn_blocking(move || {
+            let mut store = Store::load()?;
+            crate::hook::save_held(
+                &a.id,
+                &a.name,
+                &a.description,
+                &mut store,
+                store::vault().as_ref(),
+                crate::trust::now(),
+            )
+        })
+        .await
+        .map_err(|e| anyhow!(e.to_string()))
+        .and_then(|r| r);
+        Ok(done(result))
+    }
+
+    #[tool(
+        description = "Throw away a secret keymule is holding from the user's message, when the user doesn't want it saved."
+    )]
+    async fn discard_held(
+        &self,
+        Parameters(a): Parameters<HeldIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = tokio::task::spawn_blocking(move || {
+            crate::hook::discard_held(&a.id, store::vault().as_ref())
+        })
+        .await
+        .map_err(|e| anyhow!(e.to_string()))
+        .and_then(|r| r);
+        Ok(done(result))
     }
 
     #[tool(
@@ -738,4 +919,30 @@ pub async fn serve() -> anyhow::Result<()> {
     let service = Server::new().serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pasted_keys_are_checked() {
+        use crate::presets::Kind;
+        let pem = "-----BEGIN PRIVATE KEY-----\r\nMIIE\r\n-----END PRIVATE KEY-----\n";
+        assert_eq!(
+            check_other_kind(Kind::PrivateKey, pem).unwrap(),
+            "-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----"
+        );
+        assert!(check_other_kind(Kind::PrivateKey, "ssh-ed25519 AAAA… public").is_err());
+        let (id, key) = (
+            crate::detect::fake::aws_id(),
+            crate::detect::fake::aws_secret(),
+        );
+        let pair = format!(" {id} \n\n {key} ");
+        assert_eq!(
+            check_other_kind(Kind::AwsKeys, &pair).unwrap(),
+            format!("{id}\n{key}")
+        );
+        assert!(check_other_kind(Kind::AwsKeys, "just-one-line").is_err());
+    }
 }

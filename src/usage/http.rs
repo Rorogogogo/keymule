@@ -111,6 +111,14 @@ fn same_origin_allowed(cred: &Credential, from: &Url, to: &Url) -> bool {
 pub async fn send(name: &str, cred: &Credential, secret: &str, req: &Request) -> Result<Response> {
     let method = Method::from_bytes(req.method.to_ascii_uppercase().as_bytes())
         .with_context(|| format!("invalid HTTP method: {}", req.method))?;
+    let preset = presets::get_or_generic(&cred.service);
+    if preset.kind != presets::Kind::Http {
+        bail!(
+            "\"{name}\" is a {} and isn't sent in HTTP requests. {}",
+            preset.title.to_ascii_lowercase(),
+            preset.hint
+        );
+    }
     if matches!(&cred.auth, Auth::Basic { username } if username.is_empty()) {
         bail!(
             "credential \"{name}\" needs a username. Ask the user for it, then call \

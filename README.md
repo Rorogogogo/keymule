@@ -62,9 +62,10 @@ Agent:  Build #482 failed in "Integration tests"…
 
 - 🙈 **The agent never sees the secret.** It refers to credentials by name; keymule attaches the secret and redacts it from every response, command output and log line.
 - 🔒 **Locked to hosts.** A Bamboo token only goes to your Bamboo host. Requests elsewhere are refused, and redirects to other hosts are followed *without* the token. The allowed hosts are sealed in the vault with the token, so editing keymule's files doesn't change them.
-- ✋ **Paste-to-save.** Paste a token into Claude Code, Codex or Cursor by habit and keymule catches it *before* it's sent and offers to save it, named from your message (`github-launchstory` for "the PAT for our launchstory account").
+- ✋ **Paste-to-save.** Paste a token into Claude Code, Codex or Cursor by habit and keymule catches it *before* it's sent and offers to save it, named from your message (`github-launchstory` for "the PAT for our launchstory account") or, when the message says nothing, from the conversation around it (`github-homebrew-tap` when the agent just asked for `HOMEBREW_TAP_TOKEN`).
 - 🧑‍💻 **You approve the risky parts.** A new program, a new host, copying to GitHub or deleting asks you in a keymule dialog the agent can't click. **Allow all** turns the questions off for one project; deleting always asks.
 - 🧰 **CLI tools too.** `keymule exec github --env GH_TOKEN -- gh pr create …` gives the token to that program only, and hides it from its output.
+- 🔑 **Passwords, private keys and AWS keys.** Not just API tokens: `keymule exec db-pass --env PGPASSWORD -- psql …`, `keymule exec deploy-key --file KEY -- ssh -i {KEY} host` (the key goes in a temporary file only you can read, removed afterwards), `keymule exec aws-prod -- aws s3 ls` (gets `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`). Pasted ones are caught before they're sent, and the popup takes several lines for a key.
 - 🐙 **GitHub Actions secrets.** `keymule gh-secret` copies several secrets into a repo in one dialog.
 - 🖥 **Menu bar and page.** On macOS keymule lives in the menu bar and opens its page in its own window: credentials, MCP servers, live activity, leak scan. **Reveal** shows a value in a keymule window when *you* need to see it, never on the page or in a terminal.
 - 🐧 **Linux and dev containers.** Without a screen, keymule's questions wait in the page, answered from a browser you've paired.
@@ -213,6 +214,7 @@ up next to itself as `<name>.keymule-bak`.
 | `keymule add [service] [--dialog]` | Store a credential. Prompts for URL, username (if needed) and the secret; `--dialog` asks for the secret in the macOS dialog |
 | `keymule list [--json]` | Show stored credentials and adopted MCP servers (never secrets) |
 | `keymule edit <name> --url/--username/--service/--description` | Change metadata. A new host needs terminal confirmation |
+| `keymule rename <name> <new-name> [--description D]` | Give a credential a better name |
 | `keymule rotate <name> [--dialog]` | Replace the secret after rotating it |
 | `keymule reveal <name>` | Show a secret in a macOS window after you agree (never printed, so agents running it can't read it); Copy clears the clipboard after 30 s |
 | `keymule test <name>` | Check the credential still works |
@@ -221,7 +223,7 @@ up next to itself as `<name>.keymule-bak`.
 | `keymule presets` | List service presets |
 | `keymule doctor [--all] [--json] [--dir D]` | Find leaked and plain-text secrets |
 | `keymule adopt [--dry-run] [--yes] [--server NAME]` | Move plain-text MCP server secrets into the keychain |
-| `keymule exec <name> [--env VAR] -- <command…>` | Start an MCP server with its secrets (used in configs), or run a CLI tool with a stored credential in an env var. New commands need your approval once |
+| `keymule exec <name> [--env VAR] [--file VAR] -- <command…>` | Start an MCP server with its secrets (used in configs), or run a program with a stored credential: in an env var, or (`--file`, for a private key) as a temporary file whose path goes in VAR and wherever `{VAR}` is in the command. AWS keys go in their two variables. New commands need your approval once |
 | `keymule install <name> --host H --username U [--dir D]` | Copy a credential into git's credential store, so git uses it for `https://U@H`; the same dialog lets the service's CLI (gh) use it in the repo folder |
 | `keymule uninstall <name> [--host H] [--username U]` | Remove those copies again (the credential stays in keymule) |
 | `keymule gh-secret --repo O/R SECRET=name… [--via gh\|gh:LOGIN\|CRED] [--dry-run]` | Copy credentials into GitHub Actions secrets for CI, all in one dialog: encrypted with the repo's key, uploaded as the account `gh` is signed in as (or a stored GitHub credential) after keymule checks it has admin on the repo |
@@ -368,7 +370,7 @@ time they're used, or all at once with `keymule migrate`.
 
 - A Claude Code hook can't edit a message, only stop it, so the paste hook holds the message in the keychain for up to 15 minutes until you answer `y` or `n`, and then hands it to the agent with your answer.
 - Paste detection is reliable for prefixed tokens (`ghp_`, `github_pat_`, `glpat-`, `sk-`, `AKIA`…) and database URLs with a password. Unprefixed tokens such as Bamboo's are caught when the message gives context ("my bamboo token is …"). Default passwords like `postgres:postgres@localhost` pass through.
-- HTTP APIs only. Database, SSH and cloud CLI credentials are on the roadmap.
+- `http_request` is for HTTP API tokens; passwords, private keys and AWS keys are only handed to programs through `keymule exec`. Detection catches labelled passwords ("password: …", `DB_PASSWORD=…`); one dropped into a sentence with no label isn't caught, so ask your agent to open keymule's popup for passwords instead of pasting them.
 - Popups are macOS-only; elsewhere questions wait in the keymule page (see [Linux and dev containers](#-linux-and-dev-containers)). Revealing a value needs a Mac screen.
 - The agent picks the URL in `add_credential`, so read the host in the dialog before typing your token.
 - After each update of a downloaded build, macOS asks once for access to the vault key (not once per secret), because the builds aren't signed with an Apple Developer ID yet. Building from source with `scripts/install-macos.sh` avoids it.
@@ -392,8 +394,24 @@ time they're used, or all at once with `keymule migrate`.
 - **0.13**: ✅ the menu bar app
 - **0.14**: ✅ questions in the page for Linux and dev containers
 - **0.15**: ✅ ready-made downloads, a one-line installer and Homebrew
-- **Next**: more presets, database auth proxy, SSH agent, git/docker/AWS credential helpers
+- **Next**: more presets, database auth proxy, SSH agent, git/docker credential helpers
 - **Later**: Touch ID approval for sensitive credentials, short-lived credentials (AWS STS, GitHub App tokens)
+
+## 🗂 Project structure
+
+```text
+src/
+  main.rs        starts keymule
+  cli.rs         every command and its options
+  commands/      what each command does (credentials, setup)
+  storage/       the vault and what's in it: store, encrypted vault, service presets, redaction
+  consent/       asking you: popups (dialog.html), page approvals, allow-all, terminal prompts
+  agents/        the MCP server, the paste hook (hook/), the read-back guard, init, adopt
+  usage/         using a secret without showing it: HTTP, exec, MCP servers, remote, git, GitHub secrets
+  scan/          finding secrets: before a message is sent, and leaks after the fact (doctor)
+  app/           the local page (ui/) and the macOS menu bar app
+tests/e2e.py     end-to-end tests against a built binary
+```
 
 ## 📄 License
 

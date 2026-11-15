@@ -1,8 +1,8 @@
 //! Native dialogs shown by keymule itself, so the user can type a secret
 //! or approve a change without it passing through the agent.
 //!
-//! On macOS each one is a small window showing src/dialog.html, opened by
-//! src/dialog.js under `osascript -l JavaScript`. Its text goes in as a JSON
+//! On macOS each one is a small window showing dialog.html, opened by
+//! dialog.js under `osascript -l JavaScript`. Its text goes in as a JSON
 //! literal on stdin, never as script source or a command-line argument, and
 //! the page sets it with textContent, so names and URLs chosen by an agent
 //! can't inject code, and other processes can't read it.
@@ -51,6 +51,8 @@ pub struct Spec<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     destructive: Option<&'a str>,
     pub secure: bool,
+    /// The secure field takes several lines (a private key).
+    pub multiline: bool,
     pub timeout: u32,
 }
 
@@ -70,6 +72,7 @@ impl<'a> Spec<'a> {
             cancel: buttons[0],
             destructive: None,
             secure: false,
+            multiline: false,
             timeout: TIMEOUT_SECS,
         }
     }
@@ -182,14 +185,20 @@ fn test_answer(_message: &str) -> Option<String> {
 
 /// Ask for a secret in a hidden-input dialog.
 pub fn secret(message: &str) -> Result<Answer> {
+    secret_with(message, false)
+}
+
+/// [`secret`], with a field that takes several lines (private keys, AWS
+/// key pairs).
+pub fn secret_with(message: &str, multiline: bool) -> Result<Answer> {
     if let Some(a) = test_answer(message) {
         return Ok(if a == "cancel" {
             Answer::Cancelled
         } else {
-            Answer::Text(a)
+            Answer::Text(a.replace("\\n", "\n"))
         });
     }
-    platform_secret(message)
+    platform_secret(message, multiline)
 }
 
 /// Ask before deleting something. Defaults to "Cancel".
@@ -407,11 +416,12 @@ fn platform_show(_name: &str, _items: &[(String, String)], _copy: Option<&str>) 
     anyhow::bail!("showing a secret needs a macOS screen")
 }
 
-fn platform_secret(message: &str) -> Result<Answer> {
+fn platform_secret(message: &str, multiline: bool) -> Result<Answer> {
     let spec = Spec {
         default: "Save",
         cancel: "Cancel",
         secure: true,
+        multiline,
         ..Spec::new(message, "key", "", &["Cancel", "Save"])
     };
     Ok(match ask(&spec)? {
