@@ -132,6 +132,44 @@ impl Store {
         })
     }
 
+    /// Move a credential to a new name: its vault item (secret, sealed
+    /// hosts, approvals, git copies) and its entry. MCP server secrets keep
+    /// their names, since agent configs run them by name.
+    pub fn rename(
+        &mut self,
+        vault: &dyn Vault,
+        name: &str,
+        new_name: &str,
+        description: Option<String>,
+    ) -> Result<()> {
+        validate_name(new_name)?;
+        if self.servers.contains_key(name) && !self.creds.contains_key(name) {
+            anyhow::bail!(
+                "\"{name}\" is an MCP server secret; configs run it by that name, so it can't be renamed"
+            );
+        }
+        let mut cred = self.get(name)?.clone();
+        if new_name == name {
+            anyhow::bail!("it's already called \"{name}\"");
+        }
+        if self.creds.contains_key(new_name) || self.servers.contains_key(new_name) {
+            anyhow::bail!("\"{new_name}\" is taken; pick another name");
+        }
+        let raw = vault.get(name)?;
+        vault.set(new_name, &raw)?;
+        if let Some(d) = description {
+            cred.description = d;
+        }
+        self.creds.remove(name);
+        self.creds.insert(new_name.to_string(), cred);
+        if let Err(e) = self.save() {
+            let _ = vault.delete(new_name);
+            return Err(e);
+        }
+        vault.delete(name)?;
+        Ok(())
+    }
+
     /// `base`, or `base-2`, `base-3`… whichever is free.
     pub fn free_name(&self, base: &str) -> String {
         let taken = |n: &str| self.creds.contains_key(n) || self.servers.contains_key(n);
@@ -412,6 +450,42 @@ mod tests {
         );
         assert_eq!(host_of("http://localhost:8085").unwrap(), "localhost:8085");
         assert!(host_of("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn rename_moves_the_secret_and_the_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.toml");
+        let vault = testing::MemVault::default();
+        let mut store = Store::load_from(path.clone()).unwrap();
+        let cred = Credential {
+            service: "github".into(),
+            url: "https://api.github.com".into(),
+            description: "GitHub token".into(),
+            auth: Auth::Bearer,
+            hosts: vec!["api.github.com".into()],
+            added_by: "test".into(),
+        };
+        store.creds.insert("github".into(), cred.clone());
+        store.creds.insert("github-work".into(), cred.clone());
+        Sealed::new("tok", &cred).save(&vault, "github").unwrap();
+
+        assert!(
+            store.rename(&vault, "github", "github-work", None).is_err(),
+            "taken"
+        );
+        assert!(store.rename(&vault, "github", "bad name", None).is_err());
+        store
+            .rename(&vault, "github", "github-tap", Some("for the tap".into()))
+            .unwrap();
+        assert!(vault.get("github").is_err());
+        assert_eq!(
+            Sealed::peek_secret(&vault, "github-tap").as_deref(),
+            Some("tok")
+        );
+        let reloaded = Store::load_from(path).unwrap();
+        assert!(!reloaded.creds.contains_key("github"));
+        assert_eq!(reloaded.creds["github-tap"].description, "for the tap");
     }
 
     #[test]

@@ -62,7 +62,7 @@ Agent:  Build #482 failed in "Integration tests"…
 
 - 🙈 **The agent never sees the secret.** It refers to credentials by name; keymule attaches the secret and redacts it from every response, command output and log line.
 - 🔒 **Locked to hosts.** A Bamboo token only goes to your Bamboo host. Requests elsewhere are refused, and redirects to other hosts are followed *without* the token. The allowed hosts are sealed in the vault with the token, so editing keymule's files doesn't change them.
-- ✋ **Paste-to-save.** Paste a token into Claude Code, Codex or Cursor by habit and keymule catches it *before* it's sent and offers to save it, named from your message (`github-launchstory` for "the PAT for our launchstory account").
+- ✋ **Paste-to-save.** Paste a token into Claude Code, Codex or Cursor by habit and keymule catches it *before* it's sent and offers to save it, named from your message (`github-launchstory` for "the PAT for our launchstory account") or, when the message says nothing, from the conversation around it (`github-homebrew-tap` when the agent just asked for `HOMEBREW_TAP_TOKEN`).
 - 🧑‍💻 **You approve the risky parts.** A new program, a new host, copying to GitHub or deleting asks you in a keymule dialog the agent can't click. **Allow all** turns the questions off for one project; deleting always asks.
 - 🧰 **CLI tools too.** `keymule exec github --env GH_TOKEN -- gh pr create …` gives the token to that program only, and hides it from its output.
 - 🐙 **GitHub Actions secrets.** `keymule gh-secret` copies several secrets into a repo in one dialog.
@@ -213,6 +213,7 @@ up next to itself as `<name>.keymule-bak`.
 | `keymule add [service] [--dialog]` | Store a credential. Prompts for URL, username (if needed) and the secret; `--dialog` asks for the secret in the macOS dialog |
 | `keymule list [--json]` | Show stored credentials and adopted MCP servers (never secrets) |
 | `keymule edit <name> --url/--username/--service/--description` | Change metadata. A new host needs terminal confirmation |
+| `keymule rename <name> <new-name> [--description D]` | Give a credential a better name |
 | `keymule rotate <name> [--dialog]` | Replace the secret after rotating it |
 | `keymule reveal <name>` | Show a secret in a macOS window after you agree (never printed, so agents running it can't read it); Copy clears the clipboard after 30 s |
 | `keymule test <name>` | Check the credential still works |

@@ -71,6 +71,13 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Give a credential a new name (and, optionally, a new description).
+    Rename {
+        name: String,
+        new_name: String,
+        #[arg(long)]
+        description: Option<String>,
+    },
     /// Change a credential's URL, username, service or description.
     Edit {
         name: String,
@@ -332,6 +339,17 @@ async fn run(cli: Cli) -> Result<()> {
         } => add(service, name, url, username, header, description, no_verify).await,
         Cmd::List { json: false } => list(),
         Cmd::List { json: true } => list_json(),
+        Cmd::Rename {
+            name,
+            new_name,
+            description,
+        } => {
+            let mut store = Store::load()?;
+            store.rename(store::vault().as_ref(), &name, &new_name, description)?;
+            http::audit(&new_name, "RENAME", &format!("from {name}"), 0);
+            println!("Renamed \"{name}\" to \"{new_name}\".");
+            Ok(())
+        }
         Cmd::Edit {
             name,
             url,
@@ -552,8 +570,7 @@ async fn run(cli: Cli) -> Result<()> {
             let cwd = std::env::current_dir()
                 .ok()
                 .and_then(|d| d.to_str().map(str::to_string));
-            let mut input = String::new();
-            std::io::stdin().read_to_string(&mut input)?;
+            let input = hook::mod_input(&read_stdin()?);
             let store = Store::load()?;
             println!(
                 "{}",
@@ -567,8 +584,7 @@ async fn run(cli: Cli) -> Result<()> {
             let cwd = std::env::current_dir()
                 .ok()
                 .and_then(|d| d.to_str().map(str::to_string));
-            let mut input = String::new();
-            std::io::stdin().read_to_string(&mut input)?;
+            let input = hook::mod_input(&read_stdin()?);
             let mut store = Store::load()?;
             println!(
                 "{}",
@@ -1109,4 +1125,10 @@ fn menubar_cmd(background: bool, login: Option<String>) -> Result<()> {
 #[cfg(not(target_os = "macos"))]
 fn menubar_cmd(_background: bool, _login: Option<String>) -> Result<()> {
     bail!("the menu bar app is macOS-only; use `keymule ui`")
+}
+
+fn read_stdin() -> Result<String> {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    Ok(input)
 }

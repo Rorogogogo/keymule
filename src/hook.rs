@@ -48,6 +48,10 @@ struct HookInput {
     /// message doesn't.
     #[serde(default)]
     cwd: Option<String>,
+    /// The session's transcript (Claude Code, Codex): the conversation says
+    /// what a pasted secret is for when the message itself doesn't.
+    #[serde(default)]
+    transcript_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -103,6 +107,13 @@ pub fn run_as(
     ask: Ask,
 ) -> Option<String> {
     let input: HookInput = serde_json::from_str(stdin).ok()?;
+    set_conversation(
+        input
+            .transcript_path
+            .as_deref()
+            .map(conversation_from_transcript)
+            .unwrap_or_default(),
+    );
     let outcome = handle_with(
         agent,
         &input.prompt,
@@ -362,7 +373,7 @@ fn question(
                 });
             }
             None => {
-                let name = suggested_name(f, store, hint.as_deref());
+                let name = suggested_name(f, store, hint.name());
                 lines.push(if resend {
                     format!(
                         "  y           save it as `{name}` and get your message back without it"
@@ -460,12 +471,12 @@ fn save_all(
         let saved = match known_as(f, store, vault) {
             Some(n) if typed.is_none_or(|t| t == n) => Ok((n, "already saved".to_string())),
             _ => {
-                let name = pick_name(typed, suggested_name(f, store, hint.as_deref()), store);
+                let name = pick_name(typed, suggested_name(f, store, hint.name()), store);
                 if f.service == Some(detect::DATABASE) {
                     save_database(f, &name, store, vault)
                         .map(|n| (n, "an MCP server secret".into()))
                 } else {
-                    let desc = description(f, prompt, &found, hint.as_deref());
+                    let desc = description(f, prompt, &found, &hint);
                     save(f, &name, &desc, store, vault).map(|(n, todo)| {
                         let title = presets::get_or_generic(&store.creds[&n].service).title;
                         (n, format!("{title}{todo}"))
@@ -507,11 +518,17 @@ pub fn scan_json(
         .iter()
         .map(|f| {
             stripped = stripped.replace(&f.value, "[secret removed by keymule]");
+            let known = known_as(f, store, vault);
+            let suggested = match &known {
+                Some(n) => n.clone(),
+                None => suggested_name(f, store, hint.name()),
+            };
             serde_json::json!({
                 "label": f.label.as_deref().unwrap_or("secret"),
                 "masked": crate::doctor::mask(&f.value),
-                "known": known_as(f, store, vault),
-                "suggested": suggested_name(f, store, hint.as_deref()),
+                "known": known,
+                "suggested": suggested,
+                "why": hint.why,
             })
         })
         .collect();
@@ -638,6 +655,11 @@ const NOT_A_NAME: &[&str] = &[
 ];
 
 /// "<name> github account", "<name> org", "<name> project"...
+/// A variable named for a secret: `HOMEBREW_TAP_TOKEN`, `CWS_CLIENT_SECRET`.
+static SECRET_VAR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:TOKEN|KEY|SECRET|PAT|PASSWORD)\b").unwrap()
+});
+
 static ACCOUNT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b([a-z0-9][a-z0-9_.-]{1,38})\s+(?:(?:github|gitlab|bamboo|jenkins|aws|npm|openai|stripe|slack)\s+)?(?:account|org|organisation|organization|team|workspace|project|repo|company|client)\b",
@@ -675,11 +697,215 @@ fn context_hint(prompt: &str, found: &[detect::Found]) -> Option<String> {
     (!slug.is_empty()).then_some(slug)
 }
 
-/// What to add to a secret's name: what the message says it's for, or else
-/// the git repo the agent works in ("stripe-launchstory" when a bare Stripe
-/// key is pasted in ~/Developer/LaunchStory).
-fn name_hint(prompt: &str, found: &[detect::Found], cwd: Option<&str>) -> Option<String> {
-    context_hint(prompt, found).or_else(|| project_hint(cwd?))
+/// What to add to a secret's name, and where it came from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Hint {
+    name: Option<String>,
+    /// Said when the name came from the conversation, not the message.
+    why: Option<String>,
+}
+
+impl Hint {
+    fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+}
+
+/// What to add to a secret's name: what the message says it's for; else
+/// what the conversation it was pasted into says ("HOMEBREW_TAP_TOKEN" a
+/// few messages up); else the git repo the agent works in
+/// ("stripe-launchstory" for a bare Stripe key pasted in
+/// ~/Developer/LaunchStory).
+fn name_hint(prompt: &str, found: &[detect::Found], cwd: Option<&str>) -> Hint {
+    if let Some(h) = context_hint(prompt, found) {
+        return Hint {
+            name: Some(h),
+            why: None,
+        };
+    }
+    if let Some((h, why)) = CONVERSATION.with(|c| conversation_hint(&c.borrow(), found)) {
+        return Hint {
+            name: Some(h),
+            why: Some(why),
+        };
+    }
+    Hint {
+        name: cwd.and_then(project_hint),
+        why: None,
+    }
+}
+
+thread_local! {
+    /// The last few messages of the conversation the prompt belongs to, set
+    /// once per hook run by its entry point.
+    static CONVERSATION: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Remember the recent conversation for naming secrets in this run.
+pub fn set_conversation(text: String) {
+    CONVERSATION.with(|c| *c.borrow_mut() = text);
+}
+
+/// How much of the conversation keymule looks at: the recent end of it.
+const CONVERSATION_CHARS: usize = 6000;
+
+/// The recent conversation's text from a transcript (Claude Code's or
+/// Codex's JSON lines): user and assistant text only, not tool calls or
+/// their output, newest last.
+pub fn conversation_from_transcript(path: &str) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let _ = f.seek(SeekFrom::Start(len.saturating_sub(512 * 1024)));
+    let mut raw = Vec::new();
+    let _ = f.read_to_end(&mut raw);
+    let raw = String::from_utf8_lossy(&raw);
+    let mut parts: Vec<String> = vec![];
+    for line in raw.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        // Claude Code: {"message": {"role", "content"}}; Codex:
+        // {"payload": {"type": "message", "role", "content"}}.
+        let msg = if v["message"].is_object() {
+            &v["message"]
+        } else if v["payload"]["type"] == "message" {
+            &v["payload"]
+        } else {
+            continue;
+        };
+        if !matches!(msg["role"].as_str(), Some("user" | "assistant")) {
+            continue;
+        }
+        let text = match &msg["content"] {
+            serde_json::Value::String(t) => t.clone(),
+            serde_json::Value::Array(blocks) => blocks
+                .iter()
+                .filter(|b| {
+                    matches!(
+                        b["type"].as_str(),
+                        Some("text" | "input_text" | "output_text")
+                    )
+                })
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        };
+        if !text.trim().is_empty() {
+            parts.push(text);
+        }
+    }
+    recent(&parts)
+}
+
+/// What the Claude Code mod sends `keymule hook scan` / `save`: the message,
+/// or `{"keymule_input": 1, "prompt": …, "messages": [...]}` with the recent
+/// conversation too. Returns the message and remembers the conversation.
+pub fn mod_input(stdin: &str) -> String {
+    let v = match serde_json::from_str::<serde_json::Value>(stdin) {
+        Ok(v) if v.get("keymule_input").is_some() => v,
+        _ => return stdin.to_string(),
+    };
+    if let Some(m) = v["messages"].as_array() {
+        set_conversation(conversation_from_messages(m));
+    }
+    v["prompt"].as_str().unwrap_or_default().to_string()
+}
+
+/// The conversation the Claude Code mod passes in: messages in API form.
+pub fn conversation_from_messages(messages: &[serde_json::Value]) -> String {
+    let parts: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match &m["content"] {
+            serde_json::Value::String(t) => Some(t.clone()),
+            serde_json::Value::Array(blocks) => Some(
+                blocks
+                    .iter()
+                    .filter(|b| b["type"] == "text")
+                    .filter_map(|b| b["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .filter(|t| !t.trim().is_empty())
+        .collect();
+    recent(&parts)
+}
+
+/// The newest messages, up to [`CONVERSATION_CHARS`].
+fn recent(parts: &[String]) -> String {
+    let mut out: Vec<&str> = vec![];
+    let mut total = 0;
+    for p in parts.iter().rev().take(12) {
+        if total + p.len() > CONVERSATION_CHARS && !out.is_empty() {
+            break;
+        }
+        total += p.len();
+        out.push(p);
+    }
+    out.reverse();
+    let joined = out.join("\n\n");
+    let cut = joined.len().saturating_sub(CONVERSATION_CHARS);
+    let cut = (cut..=joined.len())
+        .find(|&i| joined.is_char_boundary(i))
+        .unwrap_or(joined.len());
+    joined[cut..].to_string()
+}
+
+/// A secret's name from the conversation: the last secret-style variable
+/// named in it (`HOMEBREW_TAP_TOKEN` gives `homebrew-tap`), else the last
+/// "token for X" / "X account" phrase. Secrets are taken out first, so
+/// none of them can end up in a name.
+fn conversation_hint(text: &str, found: &[detect::Found]) -> Option<(String, String)> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let mut text = text.to_string();
+    for f in found {
+        text = text.replace(&f.value, " ");
+    }
+    for v in detect::scan(&text) {
+        text = text.replace(&v.value, " ");
+    }
+    if let Some((name, var)) = SECRET_VAR_RE
+        .find_iter(&text)
+        .filter_map(|m| var_hint(m.as_str()).map(|h| (h, m.as_str().to_string())))
+        .last()
+    {
+        return Some((name, format!("named from the conversation: {var}")));
+    }
+    // The phrase closest to the end of the conversation.
+    let tail: String = {
+        let start = text.len().saturating_sub(1500);
+        let start = (start..=text.len())
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(text.len());
+        text[start..].to_string()
+    };
+    let h = context_hint(&tail, &[])?;
+    Some((h.clone(), format!("named from the conversation: \"{h}\"")))
+}
+
+/// `HOMEBREW_TAP_TOKEN` → `homebrew-tap`; None for ones that say nothing
+/// (`GH_TOKEN`, `GITHUB_TOKEN`, `API_KEY`).
+fn var_hint(var: &str) -> Option<String> {
+    const SERVICES: &[&str] = &[
+        "GITHUB", "GH", "GITLAB", "GL", "STRIPE", "OPENAI", "BAMBOO", "JENKINS", "NPM", "AWS",
+    ];
+    const FILLER: &[&str] = &[
+        "TOKEN", "KEY", "SECRET", "PAT", "PASSWORD", "API", "ACCESS", "AUTH", "PERSONAL", "CLIENT",
+        "PRIVATE", "SECRETS",
+    ];
+    let words: Vec<&str> = var
+        .split('_')
+        .filter(|w| !w.is_empty() && !SERVICES.contains(w) && !FILLER.contains(w))
+        .collect();
+    let slug = words.join("-").to_ascii_lowercase();
+    (slug.len() >= 2 && !NOT_A_NAME.contains(&slug.as_str())).then_some(slug)
 }
 
 /// The name of the git repo that holds `cwd`, as a slug. None outside a repo
@@ -708,18 +934,17 @@ fn project_hint(cwd: &str) -> Option<String> {
 }
 
 /// A short description from the message itself, secrets taken out, so the
-/// agent can later tell "github-launchstory" from "github-work".
-fn description(
-    f: &detect::Found,
-    prompt: &str,
-    found: &[detect::Found],
-    hint: Option<&str>,
-) -> String {
+/// agent can later tell "github-launchstory" from "github-work". When the
+/// name came from the conversation, it says so.
+fn description(f: &detect::Found, prompt: &str, found: &[detect::Found], hint: &Hint) -> String {
     let label = f.label.as_deref().unwrap_or("Secret");
-    let mut d = match hint {
+    let mut d = match hint.name() {
         Some(h) => format!("{label} for {h}"),
         None => label.to_string(),
     };
+    if let Some(why) = &hint.why {
+        d.push_str(&format!(" ({why})"));
+    }
     let mut text = prompt.to_string();
     for other in found {
         text = text.replace(&other.value, "\u{1}");
@@ -1324,5 +1549,104 @@ mod tests {
         cursor(GH, &mut s);
         let j = cursor("n", &mut s);
         assert!(j["user_message"].as_str().unwrap().contains(IGNORE_MARKER));
+    }
+
+    #[test]
+    fn variable_names_become_secret_names() {
+        assert_eq!(
+            var_hint("HOMEBREW_TAP_TOKEN").as_deref(),
+            Some("homebrew-tap")
+        );
+        assert_eq!(var_hint("CWS_CLIENT_SECRET").as_deref(), Some("cws"));
+        assert_eq!(var_hint("GITHUB_TOKEN"), None, "says nothing");
+        assert_eq!(var_hint("GH_TOKEN"), None);
+        assert_eq!(var_hint("OPENAI_API_KEY"), None);
+        assert_eq!(var_hint("ACME_DEPLOY_PAT").as_deref(), Some("acme-deploy"));
+    }
+
+    #[test]
+    fn the_conversation_names_a_bare_paste() {
+        let (_d, mut s) = store();
+        let v = MemVault::default();
+        set_conversation(
+            "Publishing to Homebrew needs a `HOMEBREW_TAP_TOKEN` repo secret that can push to \
+             Rorogogogo/homebrew-tap. Paste it in your next message."
+                .into(),
+        );
+        let found = detect::scan(GH);
+        let hint = name_hint(GH, &found, None);
+        assert_eq!(hint.name(), Some("homebrew-tap"));
+        assert!(hint.why.as_deref().unwrap().contains("HOMEBREW_TAP_TOKEN"));
+
+        let (msg, notes) = save_all(&format!("ok here's the token {GH}"), None, None, &mut s, &v);
+        assert!(notes[0].starts_with("`github-homebrew-tap`"), "{notes:?}");
+        assert!(msg.contains("github-homebrew-tap") && !msg.contains(GH));
+        let d = &s.creds["github-homebrew-tap"].description;
+        assert!(
+            d.contains("named from the conversation: HOMEBREW_TAP_TOKEN"),
+            "{d}"
+        );
+
+        // What the message says still comes first.
+        let hint = name_hint(&format!("the PAT for our acme account {GH}"), &found, None);
+        assert_eq!(hint.name(), Some("acme"));
+        assert_eq!(hint.why, None);
+        set_conversation(String::new());
+    }
+
+    #[test]
+    fn a_secret_in_the_conversation_never_becomes_a_name() {
+        set_conversation(format!("earlier I pasted {GH} by mistake"));
+        let found = detect::scan(GH);
+        let hint = name_hint(GH, &found, None);
+        assert!(hint.name().is_none_or(|n| !n.contains("ghp")), "{hint:?}");
+        set_conversation(String::new());
+    }
+
+    #[test]
+    fn transcripts_from_claude_code_and_codex_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("c.jsonl");
+        std::fs::write(
+            &claude,
+            [
+                r#"{"type":"user","message":{"role":"user","content":"set up the release"}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"It needs HOMEBREW_TAP_TOKEN."},{"type":"tool_use","name":"Bash","input":{"command":"echo SECRET_TOOL_TOKEN"}}]}}"#,
+                "not json",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let t = conversation_from_transcript(claude.to_str().unwrap());
+        assert!(
+            t.contains("HOMEBREW_TAP_TOKEN") && t.contains("set up the release"),
+            "{t}"
+        );
+        assert!(!t.contains("SECRET_TOOL_TOKEN"), "tool calls are left out");
+
+        let codex = dir.path().join("x.jsonl");
+        std::fs::write(
+            &codex,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Add ACME_DEPLOY_TOKEN to CI"}]}}"#,
+        )
+        .unwrap();
+        let t = conversation_from_transcript(codex.to_str().unwrap());
+        assert_eq!(t, "Add ACME_DEPLOY_TOKEN to CI");
+        assert_eq!(conversation_from_transcript("/no/such/file"), "");
+    }
+
+    #[test]
+    fn the_mod_can_send_the_conversation() {
+        let input = serde_json::json!({
+            "keymule_input": 1,
+            "prompt": "here it is",
+            "messages": [
+                {"role": "assistant", "content": [{"type": "text", "text": "I need STRIPE_LIVE_KEY for shop"}]},
+            ],
+        });
+        assert_eq!(mod_input(&input.to_string()), "here it is");
+        assert!(CONVERSATION.with(|c| c.borrow().contains("STRIPE_LIVE_KEY")));
+        assert_eq!(mod_input("plain text"), "plain text");
+        set_conversation(String::new());
     }
 }
