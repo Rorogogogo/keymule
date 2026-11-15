@@ -7,37 +7,71 @@
 
 ---
 
-## 🤔 Why?
+## 🤔 Sound familiar?
 
-You ask Claude Code to check a Bamboo pipeline, so you paste your token into the chat. That token
-now sits in the model provider's logs and in your transcript files, so you should rotate it. Next
-week you paste a new one, and the cycle repeats.
+**"I notice you shared an API key. You should rotate it right away."**
+You pasted a token so the agent could check a pipeline. Now it's in the model provider's logs and
+in a transcript file on your disk, so the agent tells you to rotate it. You make a new one, paste
+it next week, and get the same warning.
 
-keymule breaks the cycle. Tokens live in an encrypted vault whose key is in your OS keychain. The agent asks keymule to make the
-call, keymule attaches the token itself, and the agent only ever sees the response.
+**"I can't read your `.env` file" / "please don't share secrets with me".**
+The agent won't touch the credential, so you end up running the command yourself, or exporting
+`GH_TOKEN` in a terminal and pasting the output back. Or the opposite happens: it reads `.env`
+without asking, and your keys land in the transcript.
+
+**The same token, over and over.**
+New session, new agent (Claude Code today, Codex tomorrow, Cursor for that one repo), a new dev
+container: each one wants the token again, so it goes back through the clipboard and the chat.
+
+**Keys sitting in plain text.**
+Your MCP servers keep their API keys in `~/.claude.json` or `~/.cursor/mcp.json`. Every agent can
+read them, and they show up in screenshots and dotfile backups.
+
+**"Add it to GitHub Actions secrets."**
+CI needs the token, so you copy it from somewhere, paste it into GitHub's web page, and try to
+remember where else it lives when you rotate it.
+
+## 🫏 With keymule
+
+Tokens live in keymule's encrypted vault (its key is in your OS keychain). The agent asks keymule
+to use them by name; keymule attaches the secret itself and strips it from anything that comes
+back. The agent never sees the value, so there's nothing to leak and nothing to rotate.
 
 ```text
 You:    check why my bamboo pipeline failed
-Agent:  → list_credentials()            ← names and API hints only
+Agent:  → list_credentials()            ← names and hints only
         → http_request(credential="bamboo", path="/rest/api/latest/result/PROJ-PLAN")
-                                        ← keymule adds the token, strips it from the reply
+                                        ← keymule adds the token and blanks it out of the reply
 Agent:  Build #482 failed in "Integration tests"…
 ```
+
+| The problem | With keymule |
+|---|---|
+| Pasting a token into chat | The agent opens a keymule dialog and you type the token there, not in the chat. Paste one by habit and keymule catches it before it's sent and offers to save it instead. |
+| The agent won't, or shouldn't, read the credential | It doesn't need to. `http_request` makes the call for it, and `keymule exec <name> -- gh …` runs CLI tools with the token in their environment and out of their output. |
+| Giving the same token to every agent | Save it once. Claude Code, Codex, Cursor, Claude Desktop and Antigravity all use the same vault (`keymule init` sets them up). |
+| Keys in plain text in MCP configs | `keymule adopt` moves them into the vault; the servers start the same way through `keymule exec`. |
+| Copying secrets into GitHub Actions | `keymule gh-secret --repo you/app API_KEY=stripe`: one dialog, encrypted with the repo's key, uploaded with your `gh` login. |
+| Not knowing what already leaked | `keymule doctor` scans agent transcripts, configs, `.env` files and shell history, and says what to rotate. |
+| Approving every little thing | One **Allow all** for a project (Today, or until you turn it off), and keymule stops asking there. Deleting still asks. |
+| No screen in a dev container | Questions wait in the keymule page; answer them from your Mac's browser. |
 
 ---
 
 ## ✨ Features
 
-- 🙈 **The agent never sees the secret.** It refers to credentials by name; the secret is attached inside keymule and redacted from every response.
-- 🔒 **Locked to hosts.** A Bamboo token only goes to your Bamboo host. Requests elsewhere are refused, and redirects to other hosts are followed *without* the token. The allowed hosts are sealed in the keychain with the token, so editing keymule's files doesn't change them.
-- ✋ **Paste-to-save.** Paste a token into Claude Code by habit and a hook catches it *before* it is sent and asks, right in the terminal: type `y` to save it under a name taken from your message (`github-launchstory` for "the PAT for our launchstory account"; a bare Stripe key pasted in your `LaunchStory` repo becomes `stripe-launchstory`), with your words as its description so the agent picks the right one later, or `y <name>` and your message goes on with the token swapped for its keymule name, or `n` to send it as it was.
-- 🧑‍💻 **A human approves the dangerous bits.** Pointing a credential at a new host or deleting it needs you at a real terminal, so a prompt-injected agent can't redirect your token.
-- 🚫 **No reveal command.** There is deliberately no `keymule get`; an agent with a shell could just run it.
-- 📒 **Audit log.** Every request is logged to `~/.config/keymule/audit.log` (without secrets).
-- 🧩 **Service presets.** Bamboo, GitHub (incl. Actions), GitLab, Jenkins, Stripe, OpenAI, or any HTTP API. Presets know the auth scheme, how to verify a token, and give the agent an API cheat-sheet.
-- 🩺 **Leak doctor.** `keymule doctor` finds tokens that already leaked into agent transcripts, sit in plain text in agent configs, or are readable in `.env` files and shell history, so you know what to rotate.
-- 🖥 **Menu bar and local page.** On macOS keymule lives in the menu bar (`keymule menubar`, set up by `keymule init`) and opens its page in its own window; `keymule ui` opens the same page with your credentials, MCP servers, live activity and leak scan, with buttons that open keymule's dialogs. **Reveal** shows a stored value in a keymule window when you need to see it yourself, never on the page or in a terminal.
-- 📦 **Adopt MCP secrets.** `keymule adopt` moves the API keys your MCP server configs keep in plain text into the keychain. The servers start the same way, through `keymule exec`. Remote (HTTP) servers whose API key sits in a header connect through `keymule remote`, which adds the header itself.
+- 🙈 **The agent never sees the secret.** It refers to credentials by name; keymule attaches the secret and redacts it from every response, command output and log line.
+- 🔒 **Locked to hosts.** A Bamboo token only goes to your Bamboo host. Requests elsewhere are refused, and redirects to other hosts are followed *without* the token. The allowed hosts are sealed in the vault with the token, so editing keymule's files doesn't change them.
+- ✋ **Paste-to-save.** Paste a token into Claude Code, Codex or Cursor by habit and keymule catches it *before* it's sent and offers to save it, named from your message (`github-launchstory` for "the PAT for our launchstory account").
+- 🧑‍💻 **You approve the risky parts.** A new program, a new host, copying to GitHub or deleting asks you in a keymule dialog the agent can't click. **Allow all** turns the questions off for one project; deleting always asks.
+- 🧰 **CLI tools too.** `keymule exec github --env GH_TOKEN -- gh pr create …` gives the token to that program only, and hides it from its output.
+- 🐙 **GitHub Actions secrets.** `keymule gh-secret` copies several secrets into a repo in one dialog.
+- 🖥 **Menu bar and page.** On macOS keymule lives in the menu bar and opens its page in its own window: credentials, MCP servers, live activity, leak scan. **Reveal** shows a value in a keymule window when *you* need to see it, never on the page or in a terminal.
+- 🐧 **Linux and dev containers.** Without a screen, keymule's questions wait in the page, answered from a browser you've paired.
+- 🩺 **Leak doctor.** `keymule doctor` finds tokens that already leaked into agent transcripts, configs, `.env` files or shell history.
+- 📦 **Adopt MCP secrets.** `keymule adopt` moves API keys out of MCP configs; remote (HTTP) servers connect through `keymule remote`, which adds the key header itself.
+- 🧩 **Service presets.** Bamboo, GitHub, GitLab, Jenkins, Stripe, OpenAI, or any HTTP API: the auth scheme, how to verify a token, and an API cheat sheet for the agent.
+- 📒 **Activity log.** Every use is logged to `~/.config/keymule/audit.log`, without secrets.
 
 ---
 
@@ -127,17 +161,42 @@ you approve the URL once, the first time it connects.
 
 ## 🚀 Quick start
 
+Install a ready-made build (macOS or Linux, no Rust needed):
+
 ```sh
-cargo install --path .        # crates.io release coming
-keymule init                 # sets up every agent it finds: MCP server, paste hook, instructions
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Rorogogogo/keymule/releases/latest/download/keymule-installer.sh | sh
+# or, on a Mac with Homebrew:
+brew install rorogogogo/tap/keymule
 ```
+
+Then set up your agents:
+
+```sh
+keymule init                 # MCP server, paste hook and instructions for every agent it finds
+```
+
+The Linux builds are static, so they run in any container (Alpine too). Each download comes with a
+checksum and a GitHub attestation of the workflow run that built it:
+`gh attestation verify <file> --repo Rorogogogo/keymule`.
+
+<details>
+<summary>Build from source instead</summary>
+
+```sh
+cargo install --git https://github.com/Rorogogogo/keymule
+```
+
+On a Mac, `scripts/install-macos.sh` builds and signs it with a local certificate, so the
+keychain's "Always Allow" sticks across your own rebuilds (setup steps are at the top of the
+script). Downloaded builds ask once per update instead.
+</details>
 
 Restart your agent (Claude Code, Codex, Cursor, Claude Desktop or Antigravity), then just ask:
 
 > *connect my bamboo, it's at https://bamboo.yourcompany.com*
 
-The agent calls `add_credential` and a macOS dialog pops up showing the host the token will be
-locked to. You type the token there. It goes straight to the keychain, is verified against Bamboo,
+The agent calls `add_credential` and a keymule dialog pops up showing the host the token will be
+locked to. You type the token there. It goes straight into the vault, is verified against Bamboo,
 and the agent only gets back "saved, verified as you". Then: *"check my bamboo pipeline"*.
 
 Prefer the terminal? `keymule add bamboo` does the same with a hidden prompt.
@@ -312,7 +371,7 @@ time they're used, or all at once with `keymule migrate`.
 - HTTP APIs only. Database, SSH and cloud CLI credentials are on the roadmap.
 - Popups are macOS-only; elsewhere questions wait in the keymule page (see [Linux and dev containers](#-linux-and-dev-containers)). Revealing a value needs a Mac screen.
 - The agent picks the URL in `add_credential`, so read the host in the dialog before typing your token.
-- Unsigned builds make macOS ask for access to the vault key again after each rebuild (once, not once per secret). Building from source on a Mac, `scripts/install-macos.sh` signs the binary with a local certificate so "Always Allow" sticks (setup steps are in the script).
+- After each update of a downloaded build, macOS asks once for access to the vault key (not once per secret), because the builds aren't signed with an Apple Developer ID yet. Building from source with `scripts/install-macos.sh` avoids it.
 - `keymule ui` never sees a secret, but anything that can read your terminal output can open it with the link it prints.
 - `keymule reveal` asks before it shows anything, but the value is then on your screen: anyone watching it or recording it sees it, and Copy puts it on the clipboard for 30 seconds.
 - `keymule remote` speaks Streamable HTTP, not the older SSE-only transport. Keys in a URL's query string aren't adopted.
@@ -327,6 +386,12 @@ time they're used, or all at once with `keymule migrate`.
 - **0.5**: ✅ `keymule remote` for HTTP MCP servers' key headers
 - **0.6**: ✅ `keymule ui`, a local web page; `keymule reveal`
 - **0.7**: ✅ one encrypted vault, one keychain item (passphrase where there's no keychain); paste hook asks inline through the Claude Code mod
+- **0.8–0.10**: ✅ `keymule init` for Codex, Cursor, Claude Desktop and Antigravity; `keymule exec` for any credential; git installs; the read-back guard; `keymule gh-secret`
+- **0.11**: ✅ Allow all; `gh-secret` with your `gh` login; a choice dialog for secrets pasted into Codex and Cursor
+- **0.12**: ✅ cleaner dialogs with short text and simple buttons
+- **0.13**: ✅ the menu bar app
+- **0.14**: ✅ questions in the page for Linux and dev containers
+- **0.15**: ✅ ready-made downloads, a one-line installer and Homebrew
 - **Next**: more presets, database auth proxy, SSH agent, git/docker/AWS credential helpers
 - **Later**: Touch ID approval for sensitive credentials, short-lived credentials (AWS STS, GitHub App tokens)
 

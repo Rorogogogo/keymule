@@ -1,11 +1,12 @@
 [package]
 name = "keymule"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Let AI coding agents use your API tokens and passwords without ever seeing them"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rorogogogo/keymule"
+homepage = "https://github.com/Rorogogogo/keymule"
 readme = "README.md"
 keywords = ["mcp", "claude-code", "secrets", "credentials", "cli"]
 categories = ["command-line-utilities", "development-tools", "authentication"]
@@ -15,6 +16,11 @@ include = ["src/**/*", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE-*"]
 strip = true
 lto = true
 codegen-units = 1
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
 [dependencies]
 aes-gcm = "0.11.1"
