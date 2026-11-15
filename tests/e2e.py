@@ -777,5 +777,54 @@ r = kp("exec", "cws-secret", "--env", "X", "--", built, answer="deny")
 check("after --off, the agent-built program asks again (nothing was remembered)",
       r.returncode != 0 and "didn't allow" in r.stderr, r.stderr)
 
+# ---- SSH logins -------------------------------------------------------------
+SSH_PW = "e2e-ssh-pass word!"
+session(KEYMULE_TEST_DIALOG=SSH_PW)
+tools = {t["name"]: t for t in rpc("tools/list")["result"]["tools"]}
+check("add_mcp_secret tells agents it's not for SSH logins",
+      "Not for SSH logins" in tools["add_mcp_secret"]["description"])
+err, out = call("add_ssh_credential", {"name": "vps-e2e", "host": "203.0.113.7", "username": "root",
+                                       "description": "e2e VPS"})
+check("add_ssh_credential saves an SSH login", not err and "keymule ssh vps-e2e" in out and SSH_PW not in out, out)
+err, out = call("add_ssh_credential", {"name": "bad-e2e", "host": "-oProxyCommand=x", "username": "root"})
+check("add_ssh_credential refuses an option as host", err, out)
+err, out = call("add_mcp_secret", {"name": "vultr-e2e", "env": "SSHPASS", "description": "VPS root password"})
+check("add_mcp_secret keeps its description", not err, out)
+err, out = call("list_credentials", {})
+lst = json.loads(out)
+check("the SSH login is listed under credentials with its server",
+      any(c["name"] == "vps-e2e" and c.get("server") == "root@203.0.113.7" for c in lst["credentials"]), out)
+check("an MCP secret's description is listed",
+      any(s["name"] == "vultr-e2e" and s["description"] == "VPS root password" for s in lst["mcp_server_secrets"]), out)
+session(KEYMULE_TEST_DIALOG="deny")
+err, out = call("convert_mcp_secret", {"name": "vultr-e2e", "to": "ssh", "host": "203.0.113.8", "username": "root"})
+check("convert needs the user's yes", err and "didn't allow" in out, out)
+session(KEYMULE_TEST_DIALOG="allow")
+err, out = call("convert_mcp_secret", {"name": "vultr-e2e", "to": "ssh", "host": "203.0.113.8", "username": "root"})
+check("convert_mcp_secret makes it an SSH login", not err and "now an SSH login" in out, out)
+v = json.load(open(vault))
+check("convert moved the value inside the vault",
+      "mcp:vultr-e2e" not in v and secret_of(v["vultr-e2e"]) == SSH_PW, list(v))
+lj = json.loads(subprocess.run([BIN, "list", "--json"], env=env, text=True, capture_output=True).stdout)
+c = next(c for c in lj["credentials"] if c["name"] == "vultr-e2e")
+check("list --json: kind ssh, server and description kept",
+      c["kind"] == "ssh" and c["ssh"]["label"] == "root@203.0.113.8" and c["description"] == "VPS root password", c)
+r = subprocess.run([BIN, "ssh", "vultr-e2e", "--", "uptime"], env=dict(env, KEYMULE_TEST_DIALOG="deny"),
+                   text=True, capture_output=True, timeout=20)
+check("keymule ssh asks before logging in", r.returncode != 0 and "didn't allow" in r.stderr, r.stderr)
+keyfile = os.path.join(home, "id_e2e")
+with open(keyfile, "w") as f:
+    f.write("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n")
+r = subprocess.run([BIN, "edit", "vultr-e2e", "--key-file", keyfile], env=env, text=True, capture_output=True)
+lj = json.loads(subprocess.run([BIN, "list", "--json"], env=env, text=True, capture_output=True).stdout)
+c = next(c for c in lj["credentials"] if c["name"] == "vultr-e2e")
+check("edit --key-file: logs in with the file, keeps the password",
+      r.returncode == 0 and c["ssh"]["key_file"] and c["ssh"]["auth"].startswith("key file")
+      and secret_of(json.load(open(vault))["vultr-e2e"]) == SSH_PW, (r.stderr, c))
+r = subprocess.run([BIN, "edit", "vultr-e2e", "--key-file", keyfile + ".pub"], env=env, text=True, capture_output=True)
+check("edit --key-file refuses a public key", r.returncode != 0, r.stderr)
+r = subprocess.run([BIN, "exec", "vultr-e2e", "--", "true"], env=env, text=True, capture_output=True, timeout=20)
+check("keymule exec points an SSH login at keymule ssh", r.returncode != 0 and "keymule ssh" in r.stderr, r.stderr)
+
 print(f"\n{'ALL PASSED' if not fails else f'{fails} FAILED'}")
 sys.exit(1 if fails else 0)

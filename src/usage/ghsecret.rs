@@ -233,6 +233,7 @@ fn github_cred() -> Credential {
         auth: Auth::Bearer,
         hosts: vec!["api.github.com".into()],
         added_by: String::new(),
+        ssh: None,
     }
 }
 

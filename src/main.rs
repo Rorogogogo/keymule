@@ -26,12 +26,16 @@ use app::ui;
 use consent::{approvals, dialog, trust, tty};
 use scan::{detect, doctor};
 use storage::{presets, redact, store, vault};
-use usage::{cliexec, ghsecret, http, install, remote, servers};
+use usage::{cliexec, ghsecret, http, install, remote, servers, ssh};
 
 use clap::Parser;
 
 #[tokio::main]
 async fn main() {
+    // ssh runs keymule as its password helper (see `keymule ssh`).
+    if let Some(code) = ssh::askpass_main() {
+        std::process::exit(code);
+    }
     if let Err(e) = commands::run(cli::Cli::parse()).await {
         eprintln!("keymule: {e:#}");
         std::process::exit(1);

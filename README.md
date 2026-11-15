@@ -213,7 +213,10 @@ up next to itself as `<name>.keymule-bak`.
 |---|---|
 | `keymule add [service] [--dialog]` | Store a credential. Prompts for URL, username (if needed) and the secret; `--dialog` asks for the secret in the macOS dialog |
 | `keymule list [--json]` | Show stored credentials and adopted MCP servers (never secrets) |
-| `keymule edit <name> --url/--username/--service/--description` | Change metadata. A new host needs terminal confirmation |
+| `keymule add ssh --host H --username U [--port P] [--key \| --key-file PATH] [--dialog]` | Store an SSH login for one server: a password (typed in the terminal, or the dialog), a private key (pasted in the dialog), or a key file already on this machine (used where it is) |
+| `keymule ssh <name> [-- <command…>]` | Log in to that server and run a command (or open a session). keymule answers ssh's password prompt itself, or hands it the key as a private file; you approve once per folder, and the secret is scrubbed from the output |
+| `keymule convert <name> --to ssh\|password [--host H --username U --port P]` | Turn an MCP server secret that no MCP server runs into an SSH login or a password, after a yes in a dialog. The value moves inside keymule; you don't type it again |
+| `keymule edit <name> --url/--username/--service/--description` | Change metadata (an SSH login: `--host/--port/--username/--key-file`; an MCP server secret: `--description`). A new host needs terminal confirmation |
 | `keymule rename <name> <new-name> [--description D]` | Give a credential a better name |
 | `keymule rotate <name> [--dialog]` | Replace the secret after rotating it |
 | `keymule reveal <name>` | Show a secret in a macOS window after you agree (never printed, so agents running it can't read it); Copy clears the clipboard after 30 s |
@@ -244,9 +247,11 @@ up next to itself as `<name>.keymule-bak`.
 | `http_request` | `credential`, `method`, `path`, `query`, `headers`, `body`, `max_bytes`, `keep_tail` |
 | `add_credential` | Opens a secure dialog for the user to type the secret; verifies and stores it |
 | `rotate_credential` | Same dialog, for a new token on an existing credential |
-| `update_credential` | Change URL, username or description; a new host needs the user's approval in a dialog |
+| `update_credential` | Change URL, username or description (an SSH login's host, port or username); a new host or server needs the user's approval in a dialog |
 | `install_credential` | Copy a credential into git's credential store for a host and account, after the user approves in a dialog |
-| `add_mcp_secret` | Store a secret an MCP server needs (database URL, API key, header) via the dialog, for `keymule exec` or `keymule remote` |
+| `add_ssh_credential` | `name`, `host`, `port`, `username`, `auth` (`password` or `key`) or `key_file`, `description`: an SSH login, typed in the dialog, used with `keymule ssh` |
+| `convert_mcp_secret` | Move an MCP server secret no server runs to Credentials as an SSH login or a password, after the user confirms; nobody sees the value |
+| `add_mcp_secret` | Only for a secret an MCP server reads (database URL, API key, header), via the dialog, for `keymule exec` or `keymule remote`. Keeps its description |
 | `scan_for_leaks` | Run the doctor and return masked results |
 
 The secret never travels through the MCP connection. There is no tool that takes or returns one.
@@ -300,6 +305,23 @@ subfolders.
 
 A GitHub credential at `api.github.com` may also be used for `github.com` and
 `uploads.github.com`.
+
+### SSH logins
+
+```sh
+keymule add ssh --name vultr-ssh --host 203.0.113.7 --username root   # or ask your agent
+keymule ssh vultr-ssh -- uptime
+```
+
+The server, port and account are sealed with the password, so editing `credentials.toml` can't
+send it to another machine, and the agent can't add ssh options. A password reaches ssh through
+`SSH_ASKPASS`: ssh runs keymule itself, which answers only a password prompt, once, from a file
+only you can read that it deletes right away. A key goes in as `-i` with a temporary private
+file. A server that only takes keys can use a key file you already have
+(`keymule edit vultr-ssh --key-file ~/.ssh/id_ed25519`): ssh uses it where it is, and the
+password stays in the same entry (for the provider's console, say). The first connection to a server accepts its host key; a changed key is refused. A
+password stored the old way with `add_mcp_secret` moves over with `keymule convert`, or the
+**Move to Credentials** button on the page.
 
 ### Agents
 
@@ -370,7 +392,7 @@ time they're used, or all at once with `keymule migrate`.
 
 - A Claude Code hook can't edit a message, only stop it, so the paste hook holds the message in the keychain for up to 15 minutes until you answer `y` or `n`, and then hands it to the agent with your answer.
 - Paste detection is reliable for prefixed tokens (`ghp_`, `github_pat_`, `glpat-`, `sk-`, `AKIA`…) and database URLs with a password. Unprefixed tokens such as Bamboo's are caught when the message gives context ("my bamboo token is …"). Default passwords like `postgres:postgres@localhost` pass through.
-- `http_request` is for HTTP API tokens; passwords, private keys and AWS keys are only handed to programs through `keymule exec`. Detection catches labelled passwords ("password: …", `DB_PASSWORD=…`); one dropped into a sentence with no label isn't caught, so ask your agent to open keymule's popup for passwords instead of pasting them.
+- `http_request` is for HTTP API tokens; passwords, private keys and AWS keys are only handed to programs through `keymule exec`, and SSH logins only to `ssh` through `keymule ssh`. Detection catches labelled passwords ("password: …", `DB_PASSWORD=…`); one dropped into a sentence with no label isn't caught, so ask your agent to open keymule's popup for passwords instead of pasting them.
 - Popups are macOS-only; elsewhere questions wait in the keymule page (see [Linux and dev containers](#-linux-and-dev-containers)). Revealing a value needs a Mac screen.
 - The agent picks the URL in `add_credential`, so read the host in the dialog before typing your token.
 - After each update of a downloaded build, macOS asks once for access to the vault key (not once per secret), because the builds aren't signed with an Apple Developer ID yet. Building from source with `scripts/install-macos.sh` avoids it.

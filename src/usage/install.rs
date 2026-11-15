@@ -316,6 +316,7 @@ mod tests {
             auth: Auth::Bearer,
             hosts: vec!["api.github.com".into(), "github.com".into()],
             added_by: "cli".into(),
+            ssh: None,
         };
         let vault = MemVault::default();
         Sealed::new("tok_acme_123456", &cred)

@@ -29,6 +29,8 @@ const state = {
   showAllAct: false,
   busy: new Set(),
   filter: null,
+  describing: null, // the row whose description is being edited
+  converting: null, // the MCP server secret being moved to Credentials
   view: (() => { try { return sessionStorage.getItem('keymule-view') || 'overview' } catch { return 'overview' } })(),
 }
 
@@ -64,6 +66,7 @@ const ICONS = {
   sidebar: [['rect', { x: 3, y: 4, width: 18, height: 16, rx: 2.5 }], ['path', { d: 'M9 4v16' }]],
   sun: [['circle', { cx: 12, cy: 12, r: 4 }], ['path', { d: 'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4' }]],
   moon: [['path', { d: 'M20.5 14.1A8.5 8.5 0 1 1 9.9 3.5a6.6 6.6 0 0 0 10.6 10.6z' }]],
+  terminal: [['rect', { x: 2.5, y: 4, width: 19, height: 16, rx: 2 }], ['path', { d: 'm7 9 3 3-3 3M13 15h4' }]],
   monitor: [['rect', { x: 2.5, y: 4, width: 19, height: 13, rx: 2 }], ['path', { d: 'M8 21h8M12 17v4' }]],
 }
 function icon(name) {
@@ -165,6 +168,17 @@ const rotate = name => run(`rotate:${name}`,
 $('add').addEventListener('submit', e => {
   e.preventDefault()
   const service = $('svc').value
+  if (service === 'ssh') {
+    const body = {
+      service, host: $('sshhost').value.trim(), username: $('sshuser').value.trim(),
+      port: $('sshport').value.trim(), auth: $('sshauth').value, key_file: $('sshkeyfile').value.trim(),
+    }
+    if (body.auth === 'keyfile' && !body.key_file) { toast('Give the key file\'s path, like ~/.ssh/id_ed25519.', 'bad'); return }
+    if (!body.host || !body.username) { toast('Give the server\'s host or IP and the username.', 'bad'); return }
+    const msg = body.auth === 'keyfile' ? 'Saving…' : `A keymule dialog is open. Type the ${body.auth === 'key' ? 'private key' : 'password'} there.`
+    run('add', msg, () => api('/api/add', body), () => { for (const id of ['sshhost', 'sshuser', 'sshport', 'sshkeyfile']) $(id).value = '' })
+    return
+  }
   const url = $('url').value.trim()
   run('add', 'A keymule dialog is open. Type the token there.',
     () => api('/api/add', { service, url }), () => { $('url').value = '' })
@@ -177,8 +191,19 @@ const URL_HINT = {
   jenkins: 'https://jenkins.yourcompany.com',
   generic: 'https://api.example.com',
 }
-const setHint = () => { $('url').placeholder = URL_HINT[$('svc').value] || '' }
+const setHint = () => {
+  const ssh = $('svc').value === 'ssh'
+  $('url').placeholder = URL_HINT[$('svc').value] || ''
+  $('url').hidden = ssh
+  for (const id of ['sshhost', 'sshuser', 'sshport', 'sshauth']) $(id).hidden = !ssh
+  $('sshkeyfile').hidden = !ssh || $('sshauth').value !== 'keyfile'
+  $('add').querySelector('button').textContent = ssh ? 'Add SSH login' : 'Add credential'
+  $('addnote').textContent = ssh
+    ? 'You type the password (or paste the key) into a keymule dialog, never into this page. Agents run commands with keymule ssh.'
+    : 'You type the token into a keymule dialog, never into this page.'
+}
 $('svc').addEventListener('change', setHint)
+$('sshauth').addEventListener('change', setHint)
 setHint()
 
 $('scan').addEventListener('click', async () => {
@@ -235,7 +260,7 @@ applyPrefs()
 
 const VIEWS = [
   ['overview', 'Overview', 'home', 'Your agents use these keys without ever seeing them. Everything stays on this Mac.'],
-  ['credentials', 'Credentials', 'key', 'API tokens your agents use through keymule. You type each one into a keymule dialog.'],
+  ['credentials', 'Credentials', 'key', 'API tokens, passwords and SSH logins your agents use through keymule. You type each one into a keymule dialog.'],
   ['servers', 'MCP servers', 'server', 'Secrets keymule hands to your MCP servers when they start, instead of keeping them in config files.'],
   ['leaks', 'Leak check', 'shield', 'Keys that already reached a model, sit in plain text, or are readable by agents.'],
   ['activity', 'Activity', 'pulse', 'Every request and server start that used a key, newest first.'],
@@ -292,11 +317,54 @@ function rowAttrs(name) {
   }
 }
 
+// A row's description, in full, with a way to change it.
+function describeButton(name, current) {
+  return h('button', {
+    class: 'btn ghost', type: 'button', title: 'Write what it is for, so you and your agents pick the right one',
+    onclick: e => { e.stopPropagation(); state.describing = state.describing === name ? null : name; render() },
+  }, current ? 'Edit note' : 'Add note')
+}
+
+function descLine(name, text) {
+  if (state.describing === name) {
+    const input = h('input', {
+      class: 'field', type: 'text', maxlength: 300, value: text || '', 'aria-label': `Description of ${name}`,
+      placeholder: 'What it is for, e.g. Vultr VPS in Sydney (production)',
+      onclick: e => e.stopPropagation(),
+      onkeydown: e => {
+        e.stopPropagation()
+        if (e.key === 'Escape') { state.describing = null; render() }
+      },
+    })
+    const save = () => {
+      state.describing = null
+      run(`describe:${name}`, 'Saving…', () => api('/api/describe', { name, description: input.value.trim() }))
+    }
+    setTimeout(() => input.focus(), 0)
+    return h('form', {
+      class: 'inline', onclick: e => e.stopPropagation(),
+      onsubmit: e => { e.preventDefault(); save() },
+    }, input, h('button', { class: 'btn', type: 'submit' }, 'Save'),
+    h('button', { class: 'btn ghost', type: 'button', onclick: () => { state.describing = null; render() } }, 'Cancel'))
+  }
+  return text ? h('span', { class: 'desc' }, text) : null
+}
+
 // How passwords, keys and AWS pairs are used: only by programs, never HTTP.
 const USE_HINT = {
   password: 'for programs: keymule exec --env VAR',
   'private-key': 'for programs, as a file: keymule exec --file KEY',
   aws: 'for programs: keymule exec (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)',
+}
+
+function credSub(c) {
+  if (c.kind === 'ssh') {
+    return c.ssh
+      ? [mono(c.ssh.label), c.ssh.auth, mono(`keymule ssh ${c.name} -- <command>`)]
+      : ['SSH login with no server set']
+  }
+  if (c.kind && c.kind !== 'http') return [c.service, USE_HINT[c.kind]]
+  return [c.service, (c.hosts || []).join(', '), c.auth, ...(c.installed || []).map(i => `copied to ${i}`)]
 }
 
 function renderCreds(creds) {
@@ -305,13 +373,12 @@ function renderCreds(creds) {
   return creds.map(c => {
     const status = c.missing_secret ? badge('Missing', 'bad') : c.file_edited ? badge('Edited outside keymule', 'warn') : badge('Active', 'ok')
     return h('div', rowAttrs(c.name),
-      ico('key'),
+      ico(c.kind === 'ssh' ? 'terminal' : 'key'),
       h('span', { class: 'body' },
         h('span', { class: 'title' }, c.name),
-        h('span', { class: 'sub', title: c.description || null }, join(c.kind && c.kind !== 'http'
-          ? [c.description || c.service, USE_HINT[c.kind]]
-          : [c.description || c.service, (c.hosts || []).join(', '), c.auth, ...(c.installed || []).map(i => `copied to ${i}`)]))),
-      h('span', { class: 'acc' }, status, revealButton(c.name), rotateButton(c.name), deleteButton(c.name)))
+        h('span', { class: c.kind === 'ssh' ? 'sub wrap' : 'sub', title: credSub(c).map(x => x.textContent ?? x).join(' · ') }, join(credSub(c))),
+        descLine(c.name, c.description)),
+      h('span', { class: 'acc' }, status, describeButton(c.name, c.description), revealButton(c.name), rotateButton(c.name), deleteButton(c.name)))
   })
 }
 
@@ -322,13 +389,56 @@ function renderServers(servers) {
     const what = [...(s.env || []), ...(s.headers || []).map(x => `${x} header`)]
     if (s.arg_secrets) what.push(`${s.arg_secrets} in arguments`)
     const used = s.used_by.length
-    return h('div', rowAttrs(s.name),
+    const single = what.length === 1 && !s.arg_secrets
+    const row = h('div', rowAttrs(s.name),
       ico('server'),
       h('span', { class: 'body' },
         h('span', { class: 'title' }, s.name),
-        h('span', { class: 'sub' }, join([mono(what.join(', ')), used ? `used by ${used} config entr${used === 1 ? 'y' : 'ies'}` : null]))),
-      h('span', { class: 'acc' }, used ? badge('Active', 'ok') : badge('Unused'), revealButton(s.name), rotateButton(s.name), deleteButton(s.name)))
+        h('span', { class: 'sub' }, join([mono(what.join(', ')), used ? `used by ${used} config entr${used === 1 ? 'y' : 'ies'}` : 'no MCP server runs it'])),
+        descLine(s.name, s.description)),
+      h('span', { class: 'acc' }, used ? badge('Active', 'ok') : badge('Unused'),
+        !used && single ? h('button', {
+          class: 'btn ghost', type: 'button', title: 'Not an MCP server secret? Make it an SSH login or a password, without retyping it',
+          onclick: e => { e.stopPropagation(); state.converting = state.converting === s.name ? null : s.name; render() },
+        }, 'Move to Credentials') : null,
+        describeButton(s.name, s.description), revealButton(s.name), rotateButton(s.name), deleteButton(s.name)))
+    return state.converting === s.name ? [row, convertForm(s)] : row
   })
+}
+
+// Move an unused MCP server secret to Credentials as an SSH login or a
+// password. The value never comes here: keymule moves it, after a yes in its
+// own window.
+function convertForm(s) {
+  const f = state.convertForm ||= { to: 'ssh', host: '', username: '', port: '', description: s.description || '' }
+  const field = (key, attrs) => h('input', {
+    class: 'field', type: 'text', value: f[key], spellcheck: 'false', ...attrs,
+    oninput: e => { f[key] = e.target.value },
+  })
+  const busy = state.busy.has(`convert:${s.name}`)
+  const ssh = f.to === 'ssh'
+  const to = h('select', { class: 'field', 'aria-label': 'Move it as', onchange: e => { f.to = e.target.value; render() } },
+    h('option', { value: 'ssh', selected: ssh }, 'SSH login'),
+    h('option', { value: 'password', selected: !ssh }, 'Password for programs'))
+  return h('form', {
+    class: 'convert',
+    onsubmit: e => {
+      e.preventDefault()
+      if (ssh && (!f.host.trim() || !f.username.trim())) { toast('Give the server\'s host or IP and the username.', 'bad'); return }
+      const body = { name: s.name, to: f.to, host: f.host.trim(), username: f.username.trim(), port: f.port.trim(), description: f.description.trim() }
+      run(`convert:${s.name}`, `A keymule window asks before moving "${s.name}".`, () => api('/api/convert', body),
+        () => { state.converting = null; state.convertForm = null })
+    },
+  },
+  h('p', { class: 'note' }, `Move "${s.name}" to Credentials. keymule moves the value itself: nobody sees it or types it again.`),
+  h('div', { class: 'addline' }, to,
+    ssh ? field('host', { class: 'field url', placeholder: 'Host or IP, e.g. 203.0.113.7', 'aria-label': 'Host or IP' }) : null,
+    ssh ? field('username', { class: 'field short', placeholder: 'Username', 'aria-label': 'Username' }) : null,
+    ssh ? field('port', { class: 'field port', placeholder: '22', inputmode: 'numeric', 'aria-label': 'Port' }) : null),
+  h('div', { class: 'addline' },
+    field('description', { class: 'field url', placeholder: 'What it is for (optional)', 'aria-label': 'Description', maxlength: 300 }),
+    h('button', { class: 'btn', type: 'submit', disabled: busy }, busy ? 'Waiting…' : 'Move'),
+    h('button', { class: 'btn ghost', type: 'button', onclick: () => { state.converting = null; state.convertForm = null; render() } }, 'Cancel')))
 }
 
 function renderStats() {
@@ -401,6 +511,7 @@ const EVENTS = {
   START: 'Started', EXEC: 'Ran', INSTALL: 'Copied to git', UNINSTALL: 'Removed from git',
   'GH-SECRET': 'Copied to GitHub', 'AUTO-ALLOW': 'Allowed', 'ALLOW-ALL-ON': 'Allow all on',
   'ALLOW-ALL-OFF': 'Allow all off', PAIR: 'Paired', 'BAD-APPROVAL': 'Refused',
+  SSH: 'Logged in', CONVERT: 'Moved', RENAME: 'Renamed',
 }
 // keymule's own events have no credential: show them as keymule's.
 const actName = a => (a.name === '-' ? 'keymule' : a.name)
@@ -455,9 +566,10 @@ function render() {
   const list = state.list
   $('stats').replaceChildren(...renderStats())
   $('banner').replaceChildren(...renderBanner())
+  const typing = el => el.contains(document.activeElement) && document.activeElement.matches('input, select')
   if (list) {
-    $('creds').replaceChildren(...renderCreds(list.credentials))
-    $('servers').replaceChildren(...renderServers(list.servers))
+    if (!typing($('creds'))) $('creds').replaceChildren(...renderCreds(list.credentials))
+    if (!typing($('servers'))) $('servers').replaceChildren(...renderServers(list.servers).flat())
   } else if (state.error) {
     $('creds').replaceChildren(h('div', { class: 'empty t-bad' }, state.error))
   }

@@ -16,12 +16,17 @@ use anyhow::{anyhow, bail};
 use crate::dialog::{self, Answer};
 use crate::http;
 use crate::presets;
-use crate::store::{self, Auth, Credential, Sealed, Store, host_of, validate_name};
+use crate::store::{
+    self, Auth, Credential, Sealed, SshAuth, SshTarget, Store, host_of, validate_name,
+};
 
 const INSTRUCTIONS: &str = "keymule holds the user's API tokens and passwords. \
 Whenever the user asks about a service that needs authentication (Bamboo, GitHub Actions, GitLab, \
 Jenkins, internal APIs...), call list_credentials first and use http_request with the matching \
-credential name. Never ask the user to paste a token, password or API key into the chat. If no \
+credential name. For a server the user logs in to with SSH (host or IP, username, password or \
+key), call add_ssh_credential, then run commands there with `keymule ssh <name> -- <command>`; \
+add_mcp_secret is only for secrets an MCP server reads, never for SSH logins or passwords for \
+other tools (those are add_credential with service password). Never ask the user to paste a token, password or API key into the chat. If no \
 matching credential exists, call add_credential: keymule shows a secure dialog on the user's \
 screen where they type the secret, and you never see it. Ask the user for the service's base URL \
 first if needed (URLs are not secret). If a token stops working (HTTP 401), offer \
@@ -65,7 +70,8 @@ pub struct InstallArgs {
 pub struct AddArgs {
     /// Service preset: bamboo, github, gitlab, jenkins, stripe, openai or generic for an
     /// HTTP API token; password, private-key or aws for secrets that are only handed to
-    /// programs through `keymule exec` (no URL needed).
+    /// programs through `keymule exec` (no URL needed). For an SSH login use
+    /// add_ssh_credential instead.
     pub service: String,
     /// Base URL of the API, e.g. "https://bamboo.yourcompany.com". Not needed for github.com or gitlab.com.
     #[serde(default)]
@@ -84,6 +90,50 @@ pub struct AddArgs {
     /// Check the token against the service before saving (default true).
     #[serde(default)]
     pub verify: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SshArgs {
+    /// Name to store it under, e.g. "vultr-ssh". Letters, digits, '-' and '_'.
+    pub name: String,
+    /// The server's host name or IP address, e.g. "203.0.113.7".
+    pub host: String,
+    /// SSH port (default 22).
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// The account to log in as, e.g. "root".
+    pub username: String,
+    /// "password" (default) or "key" (the user pastes a private key).
+    #[serde(default)]
+    pub auth: Option<String>,
+    /// A private key file already on this machine, e.g. "~/.ssh/id_ed25519": ssh uses it
+    /// where it is (nothing is copied) and no dialog is needed.
+    #[serde(default)]
+    pub key_file: Option<String>,
+    /// What it's for, in a line, e.g. "Vultr VPS in Sydney (production)".
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConvertArgs {
+    /// The MCP server secret's name, from list_credentials (mcp_server_secrets).
+    pub name: String,
+    /// "ssh" for an SSH login (give host and username), or "password" for a password
+    /// handed to programs with keymule exec.
+    pub to: String,
+    /// For ssh: the server's host name or IP address.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// For ssh: the port (default 22).
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// For ssh: the account to log in as.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// What it's for, in a line (keeps the old one if left out).
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -144,9 +194,20 @@ pub struct UpdateArgs {
     /// New base URL. A new host needs the user's approval in a dialog.
     #[serde(default)]
     pub url: Option<String>,
-    /// Username for basic auth.
+    /// Username for basic auth, or the account an SSH login uses.
     #[serde(default)]
     pub username: Option<String>,
+    /// For an SSH login: a new host or IP. Needs the user's approval in a dialog.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// For an SSH login: a new port.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// For an SSH login: log in with this private key file on this machine (e.g.
+    /// "~/.ssh/id_ed25519"), used where it is. The stored password, if any, is kept.
+    /// "" switches back to the password.
+    #[serde(default)]
+    pub key_file: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -199,8 +260,37 @@ async fn check(
 /// Also used by `keymule add --dialog`.
 /// What to ask for, and whether the field takes several lines, for a
 /// secret that isn't an HTTP token.
-fn other_kind_prompt(preset: &presets::Preset, name: &str) -> (String, bool) {
-    match preset.kind {
+fn other_kind_prompt(kind: presets::Kind, name: &str, ssh: Option<&SshTarget>) -> (String, bool) {
+    if let Some(t) = ssh {
+        return match t.auth {
+            SshAuth::Password => (
+                format!(
+                    "Type the SSH password for {}\n\n\"{name}\": keymule only uses it to log in \
+                     to that server. Your agent never sees it.",
+                    t.label()
+                ),
+                false,
+            ),
+            SshAuth::Key => (
+                format!(
+                    "Paste the private key for {}\n\n\"{name}\": the whole block, from -----BEGIN \
+                     to -----END. keymule only uses it to log in to that server.",
+                    t.label()
+                ),
+                true,
+            ),
+            SshAuth::KeyFile => (
+                format!(
+                    "Type the password for {}\n\n\"{name}\" logs in with {}; keymule keeps \
+                     the password with it (e.g. for the provider's console). Your agent never sees it.",
+                    t.label(),
+                    t.key_file_label().unwrap_or_default()
+                ),
+                false,
+            ),
+        };
+    }
+    match kind {
         presets::Kind::PrivateKey => (
             format!(
                 "Paste the private key for \"{name}\"\n\nThe whole block, from -----BEGIN to -----END. \
@@ -227,6 +317,9 @@ fn other_kind_prompt(preset: &presets::Preset, name: &str) -> (String, bool) {
 /// Check a pasted private key or AWS key pair looks right; returns it tidied.
 pub fn check_other_kind(kind: presets::Kind, secret: &str) -> anyhow::Result<String> {
     let secret = secret.trim().replace("\r\n", "\n");
+    if secret.is_empty() {
+        bail!("nothing was typed; nothing was saved");
+    }
     match kind {
         presets::Kind::PrivateKey => {
             if !(secret.starts_with("-----BEGIN") && secret.contains("PRIVATE KEY-----")) {
@@ -264,7 +357,7 @@ async fn add_other_kind(
     preset: &'static presets::Preset,
     description: Option<String>,
 ) -> anyhow::Result<String> {
-    let (message, multiline) = other_kind_prompt(preset, &name);
+    let (message, multiline) = other_kind_prompt(preset.kind, &name, None);
     let secret = check_other_kind(preset.kind, &ask_secret_with(message, multiline).await?)?;
     let cred = Credential {
         service: preset.id.into(),
@@ -273,6 +366,7 @@ async fn add_other_kind(
         auth: Auth::Bearer,
         hosts: vec![],
         added_by: "mcp".into(),
+        ssh: None,
     };
     let mut store = Store::load()?;
     if store.creds.contains_key(&name) {
@@ -318,6 +412,12 @@ async fn add(a: AddArgs) -> anyhow::Result<String> {
             "\"{name}\" already exists. Use rotate_credential to replace its secret, or choose another name."
         );
     }
+    if preset.kind == presets::Kind::Ssh {
+        bail!(
+            "an SSH login needs its server: call add_ssh_credential with name, host, username \
+             (and port, auth=\"key\" for a private key)"
+        );
+    }
     if preset.kind != presets::Kind::Http {
         return add_other_kind(name, preset, a.description).await;
     }
@@ -350,6 +450,7 @@ async fn add(a: AddArgs) -> anyhow::Result<String> {
         auth,
         hosts,
         added_by: "mcp".into(),
+        ssh: None,
     };
     let note = check(&name, &cred, &secret, a.verify.unwrap_or(true)).await?;
 
@@ -365,6 +466,90 @@ async fn add(a: AddArgs) -> anyhow::Result<String> {
         "Saved \"{name}\" ({}){note}. Use it with http_request(credential=\"{name}\", ...).",
         preset.title
     ))
+}
+
+/// Store an SSH login. Also used by `keymule add ssh --dialog`.
+pub async fn add_ssh(a: SshArgs) -> anyhow::Result<String> {
+    validate_name(&a.name)?;
+    let auth = match a.auth.as_deref().map(str::trim) {
+        None | Some("") | Some("password") => SshAuth::Password,
+        Some("key" | "private-key") => SshAuth::Key,
+        Some(other) => bail!("auth is \"password\" or \"key\", not \"{other}\""),
+    };
+    let mut target = SshTarget::new(&a.host, a.port, &a.username, auth)?;
+    if let Some(path) = a.key_file.as_deref().filter(|p| !p.trim().is_empty()) {
+        target = target.with_key_file(path)?;
+    }
+    let taken = |s: &Store| s.creds.contains_key(&a.name) || s.servers.contains_key(&a.name);
+    if taken(&Store::load()?) {
+        bail!("\"{}\" already exists; pick another name", a.name);
+    }
+    // A key file needs no secret typed; a password can be added later
+    // with rotate_credential.
+    let secret = if target.auth == SshAuth::KeyFile {
+        String::new()
+    } else {
+        let (message, multiline) = other_kind_prompt(presets::Kind::Ssh, &a.name, Some(&target));
+        let typed = ask_secret_with(message, multiline).await?;
+        check_other_kind(
+            if target.auth == SshAuth::Key {
+                presets::Kind::PrivateKey
+            } else {
+                presets::Kind::Password
+            },
+            &typed,
+        )?
+    };
+    let cred = Credential {
+        service: "ssh".into(),
+        url: String::new(),
+        description: a.description.unwrap_or_default(),
+        auth: Auth::Bearer,
+        hosts: vec![],
+        added_by: "mcp".into(),
+        ssh: Some(target.clone()),
+    };
+    let mut store = Store::load()?;
+    if taken(&store) {
+        bail!("\"{}\" was added meanwhile; nothing was saved", a.name);
+    }
+    let vault = store::vault();
+    Sealed::new(secret, &cred).save(vault.as_ref(), &a.name)?;
+    store.creds.insert(a.name.clone(), cred);
+    if let Err(e) = store.save() {
+        let _ = vault.delete(&a.name);
+        return Err(e);
+    }
+    Ok(format!(
+        "Saved \"{name}\" (SSH login for {}, {}). Run commands there with: keymule ssh {name} -- \
+         <command> (e.g. keymule ssh {name} -- uptime). The user approves it once per folder; you \
+         get the output, never the {}.",
+        target.label(),
+        target.auth_label(),
+        target.auth_label(),
+        name = a.name,
+    ))
+}
+
+async fn convert(a: ConvertArgs) -> anyhow::Result<String> {
+    tokio::task::spawn_blocking(move || {
+        let to = crate::ssh::ConvertTo::parse(
+            a.to.trim(),
+            a.host.as_deref(),
+            a.port,
+            a.username.as_deref(),
+        )?;
+        let mut store = Store::load()?;
+        crate::ssh::convert(
+            store::vault().as_ref(),
+            &mut store,
+            &a.name,
+            to,
+            a.description,
+            &|m| crate::trust::confirm(m),
+        )
+    })
+    .await?
 }
 
 /// The sealed credential. The keychain may show a macOS approval dialog, so
@@ -397,8 +582,13 @@ async fn rotate(a: RotateArgs) -> anyhow::Result<String> {
         let note = check(&a.name, &cred, &secret, a.verify.unwrap_or(true)).await?;
         (secret, note)
     } else {
-        let (message, multiline) = other_kind_prompt(preset, &a.name);
-        let secret = check_other_kind(preset.kind, &ask_secret_with(message, multiline).await?)?;
+        let (message, multiline) = other_kind_prompt(preset.kind, &a.name, sealed.ssh.as_ref());
+        let kind = match sealed.ssh.as_ref().map(|t| t.auth) {
+            Some(SshAuth::Key) => presets::Kind::PrivateKey,
+            Some(SshAuth::Password | SshAuth::KeyFile) => presets::Kind::Password,
+            None => preset.kind,
+        };
+        let secret = check_other_kind(kind, &ask_secret_with(message, multiline).await?)?;
         (secret, String::new())
     };
     sealed.secret = secret;
@@ -415,10 +605,12 @@ async fn rotate(a: RotateArgs) -> anyhow::Result<String> {
         }
         (_, notes) => format!(" {}", notes.join("; ")),
     };
-    Ok(format!(
-        "Rotated \"{}\"{note}.{copies} Remind the user to revoke the old token at the service.",
-        a.name
-    ))
+    let revoke = if preset.kind == presets::Kind::Http {
+        " Remind the user to revoke the old token at the service."
+    } else {
+        ""
+    };
+    Ok(format!("Rotated \"{}\"{note}.{copies}{revoke}", a.name))
 }
 
 async fn add_mcp_secret(a: McpSecretArgs) -> anyhow::Result<String> {
@@ -471,7 +663,10 @@ async fn add_mcp_secret(a: McpSecretArgs) -> anyhow::Result<String> {
     .await?;
 
     let mut binding = crate::servers::Binding::default();
-    let mut meta = crate::store::ServerMeta::default();
+    let mut meta = crate::store::ServerMeta {
+        description: a.description.clone().unwrap_or_default(),
+        ..Default::default()
+    };
     match &slot {
         Slot::Env(env) => {
             binding.env.insert(env.clone(), value);
@@ -521,6 +716,66 @@ async fn update(a: UpdateArgs) -> anyhow::Result<String> {
     // Check new hosts against the sealed rules, not the editable file.
     let mut cred = sealed.apply(Store::load()?.get(&a.name)?);
     let mut changed = Vec::new();
+    if let Some(t) = cred.ssh.clone() {
+        if a.url.is_some() {
+            bail!(
+                "\"{}\" is an SSH login: change its host, port or username instead of url",
+                a.name
+            );
+        }
+        let mut new = SshTarget::new(
+            a.host.as_deref().unwrap_or(&t.host),
+            Some(a.port.unwrap_or(t.port)),
+            a.username.as_deref().unwrap_or(&t.username),
+            t.auth,
+        )?;
+        new.key_file = t.key_file.clone();
+        match a.key_file.as_deref().map(str::trim) {
+            Some("") if sealed.secret.is_empty() => {
+                bail!(
+                    "\"{}\" has no password stored; add one with rotate_credential first",
+                    a.name
+                )
+            }
+            Some("") => {
+                new.auth = SshAuth::Password;
+                new.key_file = None;
+            }
+            Some(path) => new = new.with_key_file(path)?,
+            None => {}
+        }
+        if new.host != t.host || new.port != t.port {
+            let allowed = ask_confirm(format!(
+                "Use \"{}\" to log in to another server?\n\n        {}\n\nNow it's only used for {}. \
+                 Only allow it if you asked for it.",
+                a.name,
+                new.label(),
+                t.label()
+            ))
+            .await?;
+            if !allowed {
+                bail!(
+                    "The user did not allow moving \"{}\" to {}. Nothing changed.",
+                    a.name,
+                    new.label()
+                );
+            }
+        }
+        if new.auth != t.auth || new.key_file != t.key_file {
+            changed.push("how it logs in");
+        }
+        if new.host != t.host || new.port != t.port || new.username != t.username {
+            changed.push("server");
+            sealed.exec_grants.clear(); // approvals named the old server
+        }
+        cred.ssh = Some(new);
+    } else if a.host.is_some() || a.port.is_some() || a.key_file.is_some() {
+        bail!(
+            "host, port and key_file are for SSH logins; \"{}\" isn't one",
+            a.name
+        );
+    }
+    let ssh_user = cred.ssh.is_some();
     if let Some(url) = a.url {
         let url = url.trim_end_matches('/').to_string();
         let host = host_of(&url)?;
@@ -547,7 +802,7 @@ async fn update(a: UpdateArgs) -> anyhow::Result<String> {
         cred.url = url;
         changed.push("url");
     }
-    if let Some(u) = a.username {
+    if let Some(u) = a.username.filter(|_| !ssh_user) {
         cred.auth = Auth::Basic { username: u };
         changed.push("username");
     }
@@ -556,12 +811,13 @@ async fn update(a: UpdateArgs) -> anyhow::Result<String> {
         changed.push("description");
     }
     if changed.is_empty() {
-        bail!("nothing to change: pass url, username or description");
+        bail!("nothing to change: pass url, username, host, port or description");
     }
     let mut store = Store::load()?;
     store.get(&a.name)?;
     sealed.hosts = cred.hosts.clone();
     sealed.auth = cred.auth.clone();
+    sealed.ssh = cred.ssh.clone();
     sealed.save(store::vault().as_ref(), &a.name)?;
     store.creds.insert(a.name.clone(), cred);
     store.save()?;
@@ -647,7 +903,8 @@ impl Server {
         if store.creds.is_empty() && store.servers.is_empty() && none_held {
             return Ok(text(
                 "No credentials stored yet. Use add_credential (services: bamboo, github, gitlab, \
-                 jenkins, generic); the user types the secret into a secure dialog.",
+                 jenkins, generic, password) or add_ssh_credential for an SSH login; the user \
+                 types the secret into a secure dialog.",
             ));
         }
         let list: Vec<_> = store
@@ -655,6 +912,22 @@ impl Server {
             .iter()
             .map(|(name, c)| {
                 let preset = presets::get_or_generic(&c.service);
+                let target = sealed.get(name).and_then(|s| s.ssh.clone()).or(c.ssh.clone());
+                if preset.kind == presets::Kind::Ssh {
+                    return serde_json::json!({
+                        "name": name,
+                        "kind": "SSH login (not for http_request)",
+                        "server": target.as_ref().map(|t| t.label()),
+                        "auth": target.as_ref().map(|t| t.auth_label()),
+                        "description": c.description,
+                        "how_to_use": [format!(
+                            "keymule ssh {name} -- <command>  (runs it on the server; the user approves once per folder)"
+                        )],
+                        "needs_setup": if target.is_none() {
+                            serde_json::json!([format!("ask the user for the server, then update_credential(name=\"{name}\", host=..., username=...)")])
+                        } else { serde_json::Value::Null },
+                    });
+                }
                 let mut setup = Vec::new();
                 if c.url.is_empty() {
                     setup.push(format!(
@@ -666,9 +939,14 @@ impl Server {
                         "ask the user for their username, then update_credential(name=\"{name}\", username=...)"
                     ));
                 }
-                let mut how = vec![format!("http_request(credential=\"{name}\", ...)")];
-                let (var, cli) = preset.cli_env.unwrap_or(("VAR", "<command>"));
-                how.push(format!("CLI tools: keymule exec {name} --env {var} -- {cli} ..."));
+                let mut how = Vec::new();
+                if preset.kind == presets::Kind::Http {
+                    how.push(format!("http_request(credential=\"{name}\", ...)"));
+                    let (var, cli) = preset.cli_env.unwrap_or(("VAR", "<command>"));
+                    how.push(format!("CLI tools: keymule exec {name} --env {var} -- {cli} ..."));
+                } else {
+                    how.push(preset.hint.replace("<name>", name));
+                }
                 if c.service != "github" {
                     how.push(format!(
                         "GitHub Actions secret: keymule gh-secret --repo <owner>/<repo> <SECRET_NAME>={name} (several in one go: add more SECRET=name)"
@@ -704,6 +982,7 @@ impl Server {
                 serde_json::json!({
                     "name": name,
                     "kind": "MCP server secret (not for http_request)",
+                    "description": s.description,
                     "env": s.env,
                     "headers": s.headers,
                     "used_by": s.used_by,
@@ -766,13 +1045,33 @@ impl Server {
     }
 
     #[tool(
-        description = "Store a new credential. keymule opens a secure dialog on the user's screen where they type it; you never see it. An HTTP API token is verified against the service and locked to the URL's host (ask the user for the base URL first if the service needs one). A password, private key (service private-key: the dialog takes several lines) or AWS key pair (service aws) needs no URL; it's only handed to programs with keymule exec."
+        description = "Store a new credential. keymule opens a secure dialog on the user's screen where they type it; you never see it. An HTTP API token is verified against the service and locked to the URL's host (ask the user for the base URL first if the service needs one). A password, private key (service private-key: the dialog takes several lines) or AWS key pair (service aws) needs no URL; it's only handed to programs with keymule exec. For logging in to a server over SSH, use add_ssh_credential instead."
     )]
     async fn add_credential(
         &self,
         Parameters(args): Parameters<AddArgs>,
     ) -> Result<CallToolResult, McpError> {
         Ok(done(add(args).await))
+    }
+
+    #[tool(
+        description = "Store an SSH login for one server: host or IP, port, username, and a password (or a private key with auth=\"key\", or key_file: the path of a private key already on this machine, used where it is with no dialog). keymule opens a secure dialog where the user types the password; you never see it. It's listed under Credentials and only used to log in to that server: run commands there with `keymule ssh <name> -- <command>` (the user approves once per folder). Use this, not add_mcp_secret, for any SSH server (VPS, Vultr, DigitalOcean, a Raspberry Pi...)."
+    )]
+    async fn add_ssh_credential(
+        &self,
+        Parameters(args): Parameters<SshArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(done(add_ssh(args).await))
+    }
+
+    #[tool(
+        description = "Turn an MCP server secret that isn't used by an MCP server into a credential: to=\"ssh\" (an SSH login; give host, username, optional port) or to=\"password\" (a password for programs). The value moves inside keymule: nobody sees it or types it again. The user confirms in a dialog. Use it to fix an SSH password that was stored with add_mcp_secret."
+    )]
+    async fn convert_mcp_secret(
+        &self,
+        Parameters(args): Parameters<ConvertArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(done(convert(args).await))
     }
 
     #[tool(
@@ -786,7 +1085,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Store a secret an MCP server needs (database URL, API key, password) without it entering the chat or a config file. Opens a secure dialog where the user types it. Then configure the server to run `keymule exec <name> -- <server command>`; keymule passes the secret in the env var you name, and the user approves the command once when it first starts. For a remote (HTTP) server, give `header` (e.g. x-api-key) instead of `env` and configure it as a stdio server running `keymule remote <name> <url>`."
+        description = "Only for a secret an MCP server process reads (database URL, API key, password in its env or a remote server's header), without it entering the chat or a config file. Not for SSH logins (use add_ssh_credential), API tokens (add_credential) or passwords for other tools (add_credential with service password). Opens a secure dialog where the user types it. Then configure the server to run `keymule exec <name> -- <server command>`; keymule passes the secret in the env var you name, and the user approves the command once when it first starts. For a remote (HTTP) server, give `header` (e.g. x-api-key) instead of `env` and configure it as a stdio server running `keymule remote <name> <url>`."
     )]
     async fn add_mcp_secret(
         &self,
@@ -836,7 +1135,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Change a credential's base URL, username or description, e.g. to finish setting up one marked needs_setup. Moving it to a new host shows the user an approval dialog."
+        description = "Change a credential's base URL, username or description, or an SSH login's host, port, username or key_file (a private key on this machine; the stored password is kept), e.g. to finish setting up one marked needs_setup. Moving it to a new host or server shows the user an approval dialog."
     )]
     async fn update_credential(
         &self,

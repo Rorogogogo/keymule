@@ -97,6 +97,7 @@ pub(super) fn save(
         auth,
         hosts,
         added_by: "paste-hook".into(),
+        ssh: None,
     };
     Sealed::new(found.value.clone(), &cred).save(vault, &name)?;
     store.creds.insert(name.clone(), cred);

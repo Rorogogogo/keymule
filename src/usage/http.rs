@@ -328,6 +328,7 @@ mod tests {
             auth: Auth::Bearer,
             hosts: vec![host_of(url).unwrap()],
             added_by: "cli".into(),
+            ssh: None,
         }
     }
 
