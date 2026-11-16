@@ -25,8 +25,8 @@ const state = {
   planOpen: false,
   confirmApply: false,
   doctor: null, // null, 'running', or the report
-  showAllLeaks: false,
-  showAllAct: false,
+  more: {}, // extra rows shown per list, 20 at a time
+  menu: null, // the row whose ⋯ menu is open
   busy: new Set(),
   filter: null,
   describing: null, // the row whose description is being edited
@@ -68,6 +68,9 @@ const ICONS = {
   moon: [['path', { d: 'M20.5 14.1A8.5 8.5 0 1 1 9.9 3.5a6.6 6.6 0 0 0 10.6 10.6z' }]],
   terminal: [['rect', { x: 2.5, y: 4, width: 19, height: 16, rx: 2 }], ['path', { d: 'm7 9 3 3-3 3M13 15h4' }]],
   monitor: [['rect', { x: 2.5, y: 4, width: 19, height: 13, rx: 2 }], ['path', { d: 'M8 21h8M12 17v4' }]],
+  more: [['circle', { cx: 5, cy: 12, r: 1 }], ['circle', { cx: 12, cy: 12, r: 1 }], ['circle', { cx: 19, cy: 12, r: 1 }]],
+  chev: [['path', { d: 'm9 6 6 6-6 6' }]],
+  pen: [['path', { d: 'M12 20h9' }], ['path', { d: 'M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z' }]],
 }
 function icon(name) {
   const NS = 'http://www.w3.org/2000/svg'
@@ -80,7 +83,7 @@ function icon(name) {
   }
   return svg
 }
-const ico = (name, cls) => h('span', { class: `ico ${cls || ''}`, 'aria-hidden': 'true' }, icon(name))
+const ico = (name, cls) => h('span', { class: `ico ${cls || ''}${name === 'spin' ? ' spinning' : ''}`, 'aria-hidden': 'true' }, icon(name))
 const badge = (text, kind) => h('span', { class: `badge ${kind || ''}` }, text)
 const join = parts => parts.filter(Boolean).flatMap((p, i) => (i ? [' · ', p] : [p]))
 const mono = text => h('span', { class: 'mono' }, text)
@@ -206,18 +209,85 @@ $('svc').addEventListener('change', setHint)
 $('sshauth').addEventListener('change', setHint)
 setHint()
 
+// The scan runs in keymule's background; the page polls how far it got.
+let scanTimer
+function applyScan(r) {
+  state.scan = r
+  if (r.running) state.doctor = 'running'
+  else if (r.error) state.doctor = { error: r.error }
+  else if (r.report && r.report.entries) {
+    if (state.doctor === 'running' || state.doctor === null || state.doctorId !== r.id) state.doctor = r.report
+  }
+  state.doctorId = r.id
+}
+async function pollScan() {
+  clearTimeout(scanTimer)
+  try { applyScan(await api('/api/doctor')) } catch {}
+  render()
+  if (state.scan?.running) scanTimer = setTimeout(pollScan, 400)
+}
 $('scan').addEventListener('click', async () => {
   if (state.doctor === 'running') return
   state.doctor = 'running'
+  state.scan = null
+  state.more.leaks = 0
   render()
   try {
-    const r = await api('/api/doctor', {})
-    state.doctor = r.report || { error: r.stderr || 'The scan failed.' }
+    applyScan(await api('/api/doctor', {}))
   } catch (e) {
     state.doctor = { error: e.message }
   }
   render()
+  if (state.scan?.running) scanTimer = setTimeout(pollScan, 400)
 })
+
+const PHASES = {
+  transcripts: 'Reading agent transcripts', configs: 'Checking agent configs', env: 'Looking for .env files',
+  history: 'Checking shell history', stored: 'Comparing with the keys in keymule', done: 'Finishing up',
+}
+// Transcripts are most of the work; the rest is quick.
+const PHASE_AT = { configs: 0.92, env: 0.94, history: 0.96, stored: 0.98, done: 1 }
+const size = b => (b >= 1 << 30 ? `${(b / (1 << 30)).toFixed(1)} GB` : `${Math.round(b / (1 << 20))} MB`)
+const clock = ms => { const s = Math.floor((ms || 0) / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` }
+
+// Built once per scan, then updated in place so the spinner and log don't restart.
+let scanPanel = null
+function scanBox() {
+  const fill = h('span', { class: 'fill' })
+  const track = h('div', { class: 'scanbar', role: 'progressbar', 'aria-label': 'Scan progress', 'aria-valuemin': '0', 'aria-valuemax': '100' }, fill)
+  const phase = h('span', { class: 'phase' }, 'Starting the scan…')
+  const time = h('span', { class: 'time' })
+  const meta = h('div', { class: 'scanmeta' }, 'Values stay masked, and nothing leaves this Mac.')
+  const log = h('div', { class: 'scanlog', 'aria-live': 'polite' })
+  const el = h('div', { class: 'scanrun' }, h('div', { class: 'scanhead' }, ico('spin'), phase, time), track, meta, log)
+  scanPanel = { el, fill, track, phase, time, meta, log, lines: 0 }
+  updateScanBox()
+  return el
+}
+function updateScanBox() {
+  const p = scanPanel
+  const r = state.scan
+  if (!p || !r || !p.el.isConnected) return
+  const frac = r.phase === 'transcripts' ? (r.total ? 0.9 * r.done / r.total : 0) : (PHASE_AT[r.phase] ?? 0)
+  p.fill.style.transform = `scaleX(${frac})`
+  p.track.setAttribute('aria-valuenow', String(Math.round(frac * 100)))
+  p.phase.textContent = PHASES[r.phase] || 'Scanning'
+  p.time.textContent = clock(r.elapsed_ms)
+  const parts = []
+  if (r.total) parts.push(`${size(r.done)} of ${size(r.total)}`)
+  if (r.phase === 'transcripts' && r.done > 0 && r.elapsed_ms > 2000) {
+    const left = (r.total - r.done) / (r.done / r.elapsed_ms) / 1000
+    parts.push(left < 5 ? 'almost done' : left < 60 ? `about ${Math.ceil(left / 5) * 5} s left` : `about ${Math.ceil(left / 60)} min left`)
+  }
+  if (r.lines) parts.push(`${r.found} possible ${r.found === 1 ? 'key' : 'keys'} so far`)
+  if (parts.length) p.meta.textContent = parts.join(' · ')
+  const fresh = r.lines - p.lines
+  if (fresh > 0) {
+    for (const line of r.log.slice(-Math.min(fresh, 6))) p.log.append(h('div', { class: 'ln' }, line))
+    while (p.log.childElementCount > 6) p.log.firstElementChild.remove()
+    p.lines = r.lines
+  }
+}
 
 function applyPlan() {
   if (!state.confirmApply) {
@@ -267,6 +337,7 @@ const VIEWS = [
 ]
 function go(view) {
   state.view = view
+  state.more = {}
   try { sessionStorage.setItem('keymule-view', view) } catch {}
   window.scrollTo(0, 0)
   render()
@@ -274,14 +345,6 @@ function go(view) {
 $('allact').addEventListener('click', () => go('activity'))
 
 // ---- drawing ----------------------------------------------------------------
-
-function rotateButton(name) {
-  const busy = state.busy.has(`rotate:${name}`)
-  return h('button', {
-    class: 'btn', type: 'button', disabled: busy,
-    onclick: e => { e.stopPropagation(); rotate(name) },
-  }, busy ? 'Waiting…' : 'Rotate')
-}
 
 function revealButton(name) {
   const busy = state.busy.has(`reveal:${name}`)
@@ -295,57 +358,152 @@ function revealButton(name) {
   }, busy ? 'Showing…' : 'Reveal')
 }
 
-function deleteButton(name) {
-  const busy = state.busy.has(`delete:${name}`)
-  return h('button', {
-    class: 'btn ghost danger', type: 'button', disabled: busy, title: 'Delete it from keymule (asks in a keymule window first)',
-    onclick: e => {
-      e.stopPropagation()
-      run(`delete:${name}`, `A keymule window asks before deleting "${name}".`,
-        () => api('/api/delete', { name }), loadPlan)
-    },
-  }, busy ? 'Waiting…' : 'Delete')
+const remove = name => run(`delete:${name}`, `A keymule window asks before deleting "${name}".`,
+  () => api('/api/delete', { name }), loadPlan)
+
+// Open a row and start editing its note.
+function editNote(name) {
+  state.filter = name
+  state.describing = name
+  render()
 }
 
+// The actions you need less often, behind one button. items: [label, fn, { danger, disabled, title }]
+function moreMenu(name, items) {
+  const open = state.menu === name
+  const list = items.filter(Boolean)
+  return h('span', { class: 'menuwrap' },
+    h('button', {
+      class: 'btn ghost iconly', type: 'button', title: 'More actions',
+      'aria-label': `More actions for ${name}`, 'aria-haspopup': 'menu', 'aria-expanded': open ? 'true' : 'false',
+      onclick: e => {
+        e.stopPropagation()
+        state.menu = open ? null : name
+        render()
+        if (!open) setTimeout(() => document.querySelector('.menu .mi:not(:disabled)')?.focus(), 0)
+      },
+      onkeydown: e => e.stopPropagation(),
+    }, icon('more')),
+    open ? h('div', {
+      class: 'menu', role: 'menu',
+      onclick: e => e.stopPropagation(),
+      onkeydown: e => {
+        e.stopPropagation()
+        const mis = [...e.currentTarget.querySelectorAll('.mi:not(:disabled)')]
+        const i = mis.indexOf(document.activeElement)
+        if (e.key === 'ArrowDown') { e.preventDefault(); mis[(i + 1) % mis.length]?.focus() }
+        if (e.key === 'ArrowUp') { e.preventDefault(); mis[(i - 1 + mis.length) % mis.length]?.focus() }
+        if (e.key === 'Escape' || e.key === 'Tab') { state.menu = null; render() }
+      },
+    }, list.map(([label, fn, o = {}], i) => [
+      o.danger && i ? h('div', { class: 'sep', role: 'separator' }) : null,
+      h('button', {
+        class: `mi${o.danger ? ' danger' : ''}`, type: 'button', role: 'menuitem', disabled: o.disabled, title: o.title,
+        onclick: e => { e.stopPropagation(); state.menu = null; fn() },
+      }, label),
+    ])) : null)
+}
+
+// The menu everything shares: note, rotate, delete.
+function commonItems(name, note) {
+  const rotating = state.busy.has(`rotate:${name}`)
+  const deleting = state.busy.has(`delete:${name}`)
+  return [
+    [note ? 'Edit note' : 'Add note', () => editNote(name), { title: 'Write what it is for, so you and your agents pick the right one' }],
+    [rotating ? 'Rotating…' : 'Rotate', () => rotate(name), { disabled: rotating, title: 'Type a new value in a keymule dialog' }],
+    [deleting ? 'Deleting…' : 'Delete', () => remove(name), { danger: true, disabled: deleting, title: 'Delete it from keymule (asks in a keymule window first)' }],
+  ]
+}
+
+document.addEventListener('click', e => {
+  if (state.menu && !e.target.closest('.menuwrap')) { state.menu = null; render() }
+})
+
+const isOpen = name => state.filter === name || state.describing === name
+
+// Clicking a row opens it (details and note) and shows only its activity.
 function rowAttrs(name) {
+  const open = isOpen(name)
   return {
-    class: `row click${state.filter === name ? ' sel' : ''}`,
+    class: `row click${open ? ' sel open' : ''}`,
     tabindex: '0',
-    title: 'Show only its activity',
-    onclick: () => toggleFilter(name),
-    onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleFilter(name) } },
+    'aria-expanded': open ? 'true' : 'false',
+    title: open ? 'Close' : 'Show details and only its activity',
+    onclick: () => toggleRow(name),
+    onkeydown: e => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggleRow(name) } },
   }
 }
 
-// A row's description, in full, with a way to change it.
-function describeButton(name, current) {
-  return h('button', {
-    class: 'btn ghost', type: 'button', title: 'Write what it is for, so you and your agents pick the right one',
-    onclick: e => { e.stopPropagation(); state.describing = state.describing === name ? null : name; render() },
-  }, current ? 'Edit note' : 'Add note')
+function toggleRow(name) {
+  if (isOpen(name)) {
+    state.filter = null
+    if (state.describing === name) state.describing = null
+  } else {
+    state.filter = name
+  }
+  render()
 }
+
+const rowTitle = name => h('span', { class: 'title' }, h('span', { class: 'nm' }, name), h('span', { class: 'chev' }, icon('chev')))
+
+// Shown when a row is open: the note in full, or a way to add one.
+function details(name, text) {
+  if (state.describing === name) return descLine(name, text)
+  return h('span', { class: 'detail' },
+    text ? h('span', { class: 'desc' }, text) : h('span', { class: 'desc none' }, 'No note yet.'),
+    h('button', {
+      class: 'btn notebtn', type: 'button',
+      onclick: e => { e.stopPropagation(); editNote(name) },
+      onkeydown: e => e.stopPropagation(),
+    }, icon('pen'), text ? 'Edit note' : 'Add a note'))
+}
+
+// Long lists show their first `base` rows, then 20 more per click.
+const STEP = 20
+function paged(rows, key, base) {
+  const extra = state.more[key] || 0
+  const n = rows.length <= base + 1 ? rows.length : base + extra
+  const out = rows.slice(0, n)
+  const btn = (label, fn) => h('button', { class: 'more', type: 'button', onclick: () => { fn(); render() } }, label)
+  const bar = [
+    rows.length > n ? btn(`Show ${Math.min(STEP, rows.length - n)} more`, () => { state.more[key] = extra + STEP }) : null,
+    extra ? btn('Show less', () => { state.more[key] = 0 }) : null,
+  ].filter(Boolean)
+  if (bar.length) out.push(h('div', { class: 'morebar' }, bar))
+  return out
+}
+const overviewOnly = n => (state.view === 'overview' ? n : Infinity)
 
 function descLine(name, text) {
   if (state.describing === name) {
-    const input = h('input', {
-      class: 'field', type: 'text', maxlength: 300, value: text || '', 'aria-label': `Description of ${name}`,
+    // Blur first: the page doesn't redraw a list while you type in it.
+    const cancel = () => { input.blur(); state.describing = null; render() }
+    const input = h('textarea', {
+      class: 'field notefield', rows: 3, maxlength: 300, 'aria-label': `Description of ${name}`,
       placeholder: 'What it is for, e.g. Vultr VPS in Sydney (production)',
       onclick: e => e.stopPropagation(),
       onkeydown: e => {
         e.stopPropagation()
-        if (e.key === 'Escape') { state.describing = null; render() }
+        if (e.key === 'Escape') cancel()
+        // One line of text: Enter saves.
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); save() }
       },
     })
+    input.value = text || ''
     const save = () => {
+      input.blur()
       state.describing = null
-      run(`describe:${name}`, 'Saving…', () => api('/api/describe', { name, description: input.value.trim() }))
+      run(`describe:${name}`, 'Saving…', () => api('/api/describe', { name, description: input.value.replace(/\s+/g, ' ').trim() }))
     }
-    setTimeout(() => input.focus(), 0)
+    setTimeout(() => { input.focus(); input.setSelectionRange(input.value.length, input.value.length) }, 0)
     return h('form', {
       class: 'inline', onclick: e => e.stopPropagation(),
       onsubmit: e => { e.preventDefault(); save() },
-    }, input, h('button', { class: 'btn', type: 'submit' }, 'Save'),
-    h('button', { class: 'btn ghost', type: 'button', onclick: () => { state.describing = null; render() } }, 'Cancel'))
+    }, input,
+    h('span', { class: 'notefoot' },
+      h('button', { class: 'btn primary', type: 'submit' }, 'Save note'),
+      h('button', { class: 'btn ghost', type: 'button', onclick: cancel }, 'Cancel'),
+      h('span', { class: 'muted' }, 'Enter to save · Esc to cancel')))
   }
   return text ? h('span', { class: 'desc' }, text) : null
 }
@@ -370,40 +528,42 @@ function credSub(c) {
 function renderCreds(creds) {
   $('ncreds').textContent = creds.length || ''
   if (!creds.length) return [h('div', { class: 'empty' }, 'No API credentials yet. Add one below, or ask your agent: it opens the same dialog.')]
-  return creds.map(c => {
+  return paged(creds.map(c => {
     const status = c.missing_secret ? badge('Missing', 'bad') : c.file_edited ? badge('Edited outside keymule', 'warn') : badge('Active', 'ok')
+    const open = isOpen(c.name)
     return h('div', rowAttrs(c.name),
       ico(c.kind === 'ssh' ? 'terminal' : 'key'),
       h('span', { class: 'body' },
-        h('span', { class: 'title' }, c.name),
-        h('span', { class: c.kind === 'ssh' ? 'sub wrap' : 'sub', title: credSub(c).map(x => x.textContent ?? x).join(' · ') }, join(credSub(c))),
-        descLine(c.name, c.description)),
-      h('span', { class: 'acc' }, status, describeButton(c.name, c.description), revealButton(c.name), rotateButton(c.name), deleteButton(c.name)))
-  })
+        rowTitle(c.name),
+        h('span', { class: open ? 'sub wrap' : 'sub', title: open ? null : credSub(c).map(x => x.textContent ?? x).join(' · ') }, join(credSub(c))),
+        open ? details(c.name, c.description) : null),
+      h('span', { class: 'acc' }, status, revealButton(c.name), moreMenu(c.name, commonItems(c.name, c.description))))
+  }), 'creds', overviewOnly(5))
 }
 
 function renderServers(servers) {
   $('nservers').textContent = servers.length || ''
   if (!servers.length) return [h('div', { class: 'empty' }, 'No MCP server secrets yet. Plain-text keys in your agent configs show up above, ready to move.')]
-  return servers.map(s => {
+  return paged(servers.map(s => {
     const what = [...(s.env || []), ...(s.headers || []).map(x => `${x} header`)]
     if (s.arg_secrets) what.push(`${s.arg_secrets} in arguments`)
     const used = s.used_by.length
     const single = what.length === 1 && !s.arg_secrets
+    const open = isOpen(s.name)
     const row = h('div', rowAttrs(s.name),
       ico('server'),
       h('span', { class: 'body' },
-        h('span', { class: 'title' }, s.name),
-        h('span', { class: 'sub' }, join([mono(what.join(', ')), used ? `used by ${used} config entr${used === 1 ? 'y' : 'ies'}` : 'no MCP server runs it'])),
-        descLine(s.name, s.description)),
-      h('span', { class: 'acc' }, used ? badge('Active', 'ok') : badge('Unused'),
-        !used && single ? h('button', {
-          class: 'btn ghost', type: 'button', title: 'Not an MCP server secret? Make it an SSH login or a password, without retyping it',
-          onclick: e => { e.stopPropagation(); state.converting = state.converting === s.name ? null : s.name; render() },
-        }, 'Move to Credentials') : null,
-        describeButton(s.name, s.description), revealButton(s.name), rotateButton(s.name), deleteButton(s.name)))
-    return state.converting === s.name ? [row, convertForm(s)] : row
-  })
+        rowTitle(s.name),
+        h('span', { class: open ? 'sub wrap' : 'sub' }, join([mono(what.join(', ')), used ? `used by ${used} config entr${used === 1 ? 'y' : 'ies'}` : 'no MCP server runs it'])),
+        open ? details(s.name, s.description) : null),
+      h('span', { class: 'acc' }, used ? badge('Active', 'ok') : badge('Unused'), revealButton(s.name),
+        moreMenu(s.name, [
+          !used && single ? ['Move to Credentials', () => { state.converting = state.converting === s.name ? null : s.name; render() },
+            { title: 'Not an MCP server secret? Make it an SSH login or a password, without retyping it' }] : null,
+          ...commonItems(s.name, s.description),
+        ])))
+    return state.converting === s.name ? h('div', { class: 'rowgroup' }, row, convertForm(s)) : row
+  }), 'servers', overviewOnly(5))
 }
 
 // Move an unused MCP server secret to Credentials as an SSH login or a
@@ -475,7 +635,7 @@ function renderLeaks() {
   $('scan').textContent = d === 'running' ? 'Scanning…' : d ? 'Scan again' : 'Scan'
   $('scan').disabled = d === 'running'
   if (d === null) return [h('div', { class: 'scanbox' }, ico('shield'), h('span', {}, 'Look for keys that leaked into agent transcripts, sit in plain text in configs, or are readable in .env files and shell history. Values stay masked.'))]
-  if (d === 'running') return [h('div', { class: 'scanbox' }, ico('spin'), h('span', {}, 'Reading transcripts, configs, .env files and shell history…'))]
+  if (d === 'running') return [scanBox()]
   if (d.error) return [h('div', { class: 'scanbox' }, ico('x'), h('span', { class: 't-bad' }, d.error))]
 
   const worst = e => e.locations.map(l => l.severity).sort((a, b) => SEVERITY[a] - SEVERITY[b])[0]
@@ -489,8 +649,8 @@ function renderLeaks() {
   if (!entries.length) {
     return [counts, h('div', { class: 'empty' }, `Nothing found in ${st.transcripts ?? 0} transcripts, ${(st.configs || []).length} configs and ${st.env_files ?? 0} .env files.`)]
   }
-  const shown = state.showAllLeaks ? entries : entries.slice(0, 10)
-  const rows = shown.map(e => {
+  const rows = paged(entries, 'leaks', 10).map(e => {
+    if (e instanceof Node) return e
     const sev = worst(e)
     const first = e.locations[0] || {}
     const more = e.locations.length > 1 ? `+${e.locations.length - 1} more` : null
@@ -502,7 +662,6 @@ function renderLeaks() {
         h('span', { class: 'sub' }, join([e.label, SEV_LABEL[sev], first.place, first.date, more]))),
       h('span', { class: 'acc' }, b))
   })
-  if (entries.length > shown.length) rows.push(h('button', { class: 'more', type: 'button', onclick: () => { state.showAllLeaks = true; render() } }, `Show all ${entries.length}`))
   return [counts, ...rows]
 }
 
@@ -519,9 +678,10 @@ const actName = a => (a.name === '-' ? 'keymule' : a.name)
 function renderActivity() {
   const f = state.filter
   $('filter').replaceChildren(f ? h('button', { class: 'chip', type: 'button', onclick: () => toggleFilter(f), title: 'Show everything' }, f, ' ×') : '')
-  const all = state.audit.filter(a => !f || a.name === f).slice(-150).reverse()
+  const all = state.audit.filter(a => !f || a.name === f).slice(-1000).reverse()
   if (!all.length) return [h('div', { class: 'empty' }, f ? `Nothing from ${f} yet.` : 'Requests and server starts show up here as they happen.')]
-  const rows = (state.showAllAct || state.view === 'activity' ? all : all.slice(0, 8)).map(a => {
+  return paged(all, 'act', state.view === 'activity' ? 50 : 8).map(a => {
+    if (a instanceof Node) return a
     const event = EVENTS[a.method]
     const shown = a.method === 'REVEAL'
     const ok = a.status >= 200 && a.status < 300
@@ -531,8 +691,6 @@ function renderActivity() {
       h('span', { class: 'st' }, event ? badge(event, a.method === 'BAD-APPROVAL' ? 'bad' : '') : shown ? badge('Revealed', 'warn') : badge(a.status || '—', ok ? 'ok' : 'bad')),
       h('span', { class: 'when' }, when(a.ts)))
   })
-  if (all.length > rows.length) rows.push(h('button', { class: 'more', type: 'button', onclick: () => { state.showAllAct = true; render() } }, `Show ${all.length - rows.length} more`))
-  return rows
 }
 
 function renderNav() {
@@ -551,7 +709,19 @@ function renderNav() {
   for (const el of document.querySelectorAll('[data-in]')) el.hidden = !el.dataset.in.split(' ').includes(v[0])
 }
 
+const drawn = {}
+const objId = new WeakMap()
+let nextId = 1
+const idOf = o => (o && typeof o === 'object' ? (objId.get(o) || (objId.set(o, nextId++), objId.get(o))) : o)
+function draw(id, key, build) {
+  const k = JSON.stringify(key)
+  if (drawn[id] === k) return
+  drawn[id] = k
+  $(id).replaceChildren(...build())
+}
+
 function render() {
+  const y = window.scrollY
   renderNav()
   const live = $('live')
   live.className = `live${state.live === false ? ' off' : ''}`
@@ -566,21 +736,38 @@ function render() {
   const list = state.list
   $('stats').replaceChildren(...renderStats())
   $('banner').replaceChildren(...renderBanner())
-  const typing = el => el.contains(document.activeElement) && document.activeElement.matches('input, select')
+  const typing = el => el.contains(document.activeElement) && document.activeElement.matches('input, select, textarea, .mi')
+  const busy = [...state.busy]
+  const rowState = [state.view, state.filter, state.describing, state.menu, busy]
   if (list) {
-    if (!typing($('creds'))) $('creds').replaceChildren(...renderCreds(list.credentials))
-    if (!typing($('servers'))) $('servers').replaceChildren(...renderServers(list.servers).flat())
+    if (!typing($('creds'))) draw('creds', [list.credentials, state.more.creds, ...rowState], () => renderCreds(list.credentials))
+    if (!typing($('servers'))) draw('servers', [list.servers, state.more.servers, state.converting, state.convertForm?.to, ...rowState], () => renderServers(list.servers))
   } else if (state.error) {
-    $('creds').replaceChildren(h('div', { class: 'empty t-bad' }, state.error))
+    draw('creds', ['error', state.error], () => [h('div', { class: 'empty t-bad' }, state.error)])
   }
   $('add').querySelector('button').disabled = state.busy.has('add')
-  $('leaks').replaceChildren(...renderLeaks())
-  $('activity').replaceChildren(...renderActivity())
+  draw('leaks', [idOf(state.doctor), state.more.leaks, state.doctor === 'running' ? state.scan?.id : null], renderLeaks)
+  if (state.doctor === 'running') updateScanBox()
+  const last = state.audit[state.audit.length - 1]
+  draw('activity', [state.audit.length, last?.ts, last?.name, state.filter, state.more.act, state.view, new Date().toDateString()], renderActivity)
+  // Nothing above should move the page; put it back if the browser did.
+  if (Math.abs(window.scrollY - y) > 1) window.scrollTo(0, y)
+  updateProgress()
 }
+
+// Scroll position as a thin bar along the top, in place of a scrollbar.
+function updateProgress() {
+  const s = document.scrollingElement
+  const max = s.scrollHeight - s.clientHeight
+  $('progress').firstElementChild.style.transform = `scaleX(${max > 0 ? Math.min(1, s.scrollTop / max) : 0})`
+}
+addEventListener('scroll', updateProgress, { passive: true })
+addEventListener('resize', updateProgress)
 
 render()
 refresh()
 loadPlan()
+pollScan()
 setInterval(refresh, 20000)
 setInterval(async () => {
   try {

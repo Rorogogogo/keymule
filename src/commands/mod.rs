@@ -129,7 +129,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Doctor { all, json, dir } => {
+        Cmd::Doctor {
+            all,
+            json,
+            dir,
+            progress,
+        } => {
             let opts = doctor::Options {
                 home: home()?,
                 dir: match dir {
@@ -138,7 +143,16 @@ pub async fn run(cli: Cli) -> Result<()> {
                 },
                 check_stored: true,
             };
-            let report = doctor::run(&opts);
+            let report = if progress {
+                doctor::run_with(&opts, &|p| {
+                    if let Ok(line) = serde_json::to_string(&p) {
+                        use std::io::Write;
+                        let _ = writeln!(std::io::stderr().lock(), "{line}");
+                    }
+                })
+            } else {
+                doctor::run(&opts)
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {

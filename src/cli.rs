@@ -129,6 +129,9 @@ pub enum Cmd {
         /// Project directory to check for .env and .mcp.json files (default: current directory).
         #[arg(long)]
         dir: Option<std::path::PathBuf>,
+        /// Write progress to stderr as JSON lines (for `keymule ui`).
+        #[arg(long, hide = true)]
+        progress: bool,
     },
     /// Move secrets that MCP server configs keep in plain text into the keychain.
     Adopt {

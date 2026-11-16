@@ -370,7 +370,9 @@ fn question(
     let resend = agent == Agent::Cursor;
     let hint = name_hint(prompt, found, cwd);
     let what = if found.len() == 1 {
-        format!("it has a {}", describe(&found[0]))
+        let d = describe(&found[0]);
+        let an = d.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']);
+        format!("it has {} {d}", if an { "an" } else { "a" })
     } else {
         let list: Vec<String> = found.iter().map(describe).collect();
         format!("it has {} secrets: {}", found.len(), list.join(", "))

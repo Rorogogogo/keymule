@@ -94,6 +94,14 @@ impl EncVault {
         if let Some(k) = self.key.get() {
             return Ok(*k);
         }
+        // Take turns with other keymule processes. macOS gives each process
+        // that asks for the item its own prompt, so two asking at once (the
+        // menu-bar app and the page's `keymule list`, or init and an MCP
+        // server) meant answering twice: Always Allow on the first doesn't
+        // cancel the second. Waiting here, the second reads the key after the
+        // first's answer, without a prompt. It also stops two first runs from
+        // each making a vault key.
+        let _turn = self.key_turn();
         let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEY_ITEM)?;
         let key = match entry.get_password() {
             Ok(b64) => {
@@ -126,6 +134,26 @@ impl EncVault {
         };
         let _ = self.key.set(key);
         Ok(key)
+    }
+
+    /// A lock held while this process reads (or makes) the vault key. Its
+    /// own file, not the vault's lock: `change` holds that one while it reads.
+    /// Best effort: without a lock file, or after two minutes of waiting
+    /// (a prompt nobody answers), go ahead as before.
+    fn key_turn(&self) -> Option<File> {
+        let dir = self.path.parent().unwrap_or(std::path::Path::new("."));
+        std::fs::create_dir_all(dir).ok()?;
+        let lock = private_file_keep(&dir.join("vault-key.lock")).ok()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Some(lock),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(_) => return None,
+            }
+        }
     }
 
     fn key_for(&self, salt: Option<&[u8]>) -> Result<[u8; 32]> {
@@ -311,6 +339,31 @@ mod tests {
         legacy: Option<Box<dyn Vault>>,
     ) -> EncVault {
         EncVault::new(dir.path().join("vault.enc"), source, legacy)
+    }
+
+    #[test]
+    fn processes_take_turns_reading_the_key() {
+        let d = tempfile::tempdir().unwrap();
+        let a = vault(&d, KeySource::Fixed([7; 32]), None);
+        let path = d.path().join("vault.enc");
+        let held = a.key_turn().expect("first turn");
+        let waited = std::thread::scope(|s| {
+            let t = s.spawn(move || {
+                let b = EncVault::new(path, KeySource::Fixed([7; 32]), None);
+                let start = std::time::Instant::now();
+                let turn = b.key_turn();
+                (turn.is_some(), start.elapsed())
+            });
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(held);
+            t.join().unwrap()
+        });
+        assert!(waited.0, "second turn comes after the first ends");
+        assert!(
+            waited.1 >= std::time::Duration::from_millis(250),
+            "{:?}",
+            waited.1
+        );
     }
 
     #[test]
