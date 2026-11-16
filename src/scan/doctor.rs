@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::UNIX_EPOCH;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use regex::Regex;
 use serde::Serialize;
@@ -109,16 +109,75 @@ impl Collector {
     }
 }
 
+/// How far a scan has got, for a progress display. Never holds a secret:
+/// only counts, file places and what the scan is doing.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Progress {
+    /// transcripts, configs, env, history, stored or done.
+    pub phase: &'static str,
+    /// A line for the log, if there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msg: Option<String>,
+    /// Bytes of transcripts read so far, and in all.
+    pub done: u64,
+    pub total: u64,
+    /// Distinct secrets found so far.
+    pub found: usize,
+}
+
 pub fn run(opts: &Options) -> Report {
+    run_with(opts, &|_| {})
+}
+
+/// `run`, telling `progress` what it is doing as it goes.
+pub fn run_with(opts: &Options, progress: &(dyn Fn(Progress) + Sync)) -> Report {
     let mut stats = Stats::default();
     let collector = Mutex::new(Collector::default());
+    let found = |c: &Mutex<Collector>| c.lock().map(|c| c.by_secret.len()).unwrap_or(0);
+    let say = |phase, msg: String, stats: &Stats| {
+        progress(Progress {
+            phase,
+            msg: Some(msg),
+            done: stats.transcript_bytes,
+            total: stats.transcript_bytes,
+            found: found(&collector),
+        })
+    };
 
-    scan_transcripts(&opts.home, &collector, &mut stats);
+    scan_transcripts(&opts.home, &collector, &mut stats, progress);
+    say("configs", "Checking agent configs".into(), &stats);
     scan_configs(opts, &collector, &mut stats);
+    for c in &stats.configs {
+        say("configs", format!("Checked {c}"), &stats);
+    }
+    say("env", "Looking for .env files".into(), &stats);
     scan_env_files(opts, &collector, &mut stats);
+    say(
+        "env",
+        format!(
+            "Checked {} .env {}",
+            stats.env_files,
+            plural(stats.env_files, "file", "files")
+        ),
+        &stats,
+    );
     scan_histories(&opts.home, &collector, &mut stats);
+    say(
+        "history",
+        format!(
+            "Checked {} shell {}",
+            stats.histories,
+            plural(stats.histories, "history", "histories")
+        ),
+        &stats,
+    );
 
     let stored = if opts.check_stored {
+        say(
+            "stored",
+            "Comparing what was found with the keys in keymule".into(),
+            &stats,
+        );
         stored_secrets()
     } else {
         HashMap::new()
@@ -147,7 +206,31 @@ pub fn run(opts: &Options) -> Report {
             .then(b.locations.len().cmp(&a.locations.len()))
             .then(a.masked.cmp(&b.masked))
     });
+    let n = entries.len();
+    progress(Progress {
+        phase: "done",
+        msg: Some(format!(
+            "Done: {n} possible {} found",
+            plural(n, "key", "keys")
+        )),
+        done: stats.transcript_bytes,
+        total: stats.transcript_bytes,
+        found: n,
+    });
     Report { stats, entries }
+}
+
+fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
+    if n == 1 { one } else { many }
+}
+
+fn size_text(bytes: u64) -> String {
+    let mb = bytes as f64 / 1_048_576.0;
+    if mb >= 1024.0 {
+        format!("{:.1} GB", mb / 1024.0)
+    } else {
+        format!("{mb:.0} MB")
+    }
 }
 
 // ---- transcripts -----------------------------------------------------------
@@ -163,7 +246,17 @@ static PREFILTER: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
 /// Big transcripts are split into chunks of this size so all cores help.
 const CHUNK: u64 = 8 << 20;
 
-fn scan_transcripts(home: &Path, collector: &Mutex<Collector>, stats: &mut Stats) {
+fn scan_transcripts(
+    home: &Path,
+    collector: &Mutex<Collector>,
+    stats: &mut Stats,
+    progress: &(dyn Fn(Progress) + Sync),
+) {
+    progress(Progress {
+        phase: "transcripts",
+        msg: Some("Looking for agent transcripts".into()),
+        ..Progress::default()
+    });
     let mut files: Vec<(PathBuf, &'static str, u64)> = Vec::new();
     for (dir, agent) in [
         (home.join(".claude").join("projects"), "Claude Code"),
@@ -178,6 +271,18 @@ fn scan_transcripts(home: &Path, collector: &Mutex<Collector>, stats: &mut Stats
     }
     stats.transcripts = files.len();
     stats.transcript_bytes = files.iter().map(|f| f.2).sum();
+    let total = stats.transcript_bytes;
+    progress(Progress {
+        phase: "transcripts",
+        msg: Some(format!(
+            "Reading {} {} ({})",
+            files.len(),
+            plural(files.len(), "transcript", "transcripts"),
+            size_text(total)
+        )),
+        total,
+        ..Progress::default()
+    });
 
     // (file index, start, end), biggest pieces first.
     let mut work: Vec<(usize, u64, u64)> = Vec::new();
@@ -201,6 +306,9 @@ fn scan_transcripts(home: &Path, collector: &Mutex<Collector>, stats: &mut Stats
         .collect();
 
     let next = AtomicUsize::new(0);
+    let read = AtomicU64::new(0);
+    // A line every so often, not one per piece: there can be thousands.
+    let last = Mutex::new(Instant::now());
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
@@ -214,6 +322,20 @@ fn scan_transcripts(home: &Path, collector: &Mutex<Collector>, stats: &mut Stats
                         break;
                     };
                     let hits = scan_range(&files[file].0, start, end);
+                    let done = read.fetch_add(end - start, Ordering::Relaxed) + (end - start);
+                    if let Ok(mut t) = last.try_lock()
+                        && t.elapsed() >= Duration::from_millis(150)
+                    {
+                        *t = Instant::now();
+                        drop(t);
+                        progress(Progress {
+                            phase: "transcripts",
+                            msg: Some(format!("Reading {}", meta[file].1)),
+                            done,
+                            total,
+                            found: collector.lock().map(|c| c.by_secret.len()).unwrap_or(0),
+                        });
+                    }
                     if hits.is_empty() {
                         continue;
                     }
