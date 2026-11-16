@@ -5,6 +5,8 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/Rorogogogo/keymule/ci.yml?branch=main&label=CI)](https://github.com/Rorogogogo/keymule/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#-license)
 
+https://github.com/user-attachments/assets/7a568e4a-df78-4e66-bde9-eceb996ad39d
+
 ## 🚀 Get started
 
 **1. Install** (macOS or Linux, no Rust needed):
