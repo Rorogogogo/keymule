@@ -5,6 +5,41 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/Rorogogogo/keymule/ci.yml?branch=main&label=CI)](https://github.com/Rorogogogo/keymule/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#-license)
 
+## 🚀 Get started
+
+**1. Install** (macOS or Linux, no Rust needed):
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Rorogogogo/keymule/releases/latest/download/keymule-installer.sh | sh
+```
+
+On a Mac with Homebrew you can use `brew install rorogogogo/tap/keymule` instead.
+
+**2. Set up your agents:**
+
+```sh
+keymule init
+```
+
+It finds Claude Code, Codex, Cursor, Claude Desktop and Antigravity, and gives each one keymule's
+MCP server, the paste-to-save hook and a short note on how to use keymule. Every file it edits is
+backed up first, and `keymule init --dry-run` shows the changes without making them. On a Mac it
+also puts keymule in the menu bar. When macOS asks whether keymule may use your keychain, enter
+your password and click **Always Allow**.
+
+**3. Restart your agent and ask:**
+
+> *connect my github*
+
+A keymule window opens and you type the token there, not in the chat. The agent only hears
+"saved, verified as you", and from then on it can use the token: *"why did my last CI run fail?"*
+
+Pasted a token into the chat out of habit? keymule catches it before it's sent and offers to save
+it instead.
+
+Building from source, checking downloads, or doing it all from the terminal:
+[setup details](#-setup-details).
+
 ---
 
 ## 🤔 Sound familiar?
@@ -160,21 +195,9 @@ you approve the URL once, the first time it connects.
 
 ---
 
-## 🚀 Quick start
+## 🔧 Setup details
 
-Install a ready-made build (macOS or Linux, no Rust needed):
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Rorogogogo/keymule/releases/latest/download/keymule-installer.sh | sh
-# or, on a Mac with Homebrew:
-brew install rorogogogo/tap/keymule
-```
-
-Then set up your agents:
-
-```sh
-keymule init                 # MCP server, paste hook and instructions for every agent it finds
-```
+The [three steps at the top](#-get-started) are all most people need. The rest:
 
 The Linux builds are static, so they run in any container (Alpine too). Each download comes with a
 checksum and a GitHub attestation of the workflow run that built it:
@@ -192,7 +215,7 @@ keychain's "Always Allow" sticks across your own rebuilds (setup steps are at th
 script). Downloaded builds ask once per update instead.
 </details>
 
-Restart your agent (Claude Code, Codex, Cursor, Claude Desktop or Antigravity), then just ask:
+For a self-hosted service, give the agent its address:
 
 > *connect my bamboo, it's at https://bamboo.yourcompany.com*
 
