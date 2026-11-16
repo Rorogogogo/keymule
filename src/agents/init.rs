@@ -203,7 +203,17 @@ pub fn run(dry_run: bool) -> Result<()> {
         println!("would offer allow-all for ~ (first setup only)");
     } else {
         let vault = crate::store::vault();
-        match crate::trust::offer_once(vault.as_ref(), &home) {
+        // Without a screen the question waits in the keymule page, and until
+        // a browser is paired nobody can answer it: don't hold up setup (or
+        // an install script) for three minutes. It's offered next time.
+        let nobody_to_ask =
+            crate::dialog::page_mode() && crate::approvals::devices(vault.as_ref()).is_empty();
+        let offered = if nobody_to_ask {
+            Ok(None)
+        } else {
+            crate::trust::offer_once(vault.as_ref(), &home)
+        };
+        match offered {
             Ok(Some(a)) => say(
                 &format!(
                     "allow all is on in {}, {}",
@@ -219,7 +229,9 @@ pub fn run(dry_run: bool) -> Result<()> {
         }
     }
     if !dry_run {
-        println!("\nRestart your agents so they pick up keymule, then try: keymule add bamboo");
+        println!(
+            "\nRestart your agents so they pick up keymule, then ask one: \"connect my github\""
+        );
     }
     Ok(())
 }
