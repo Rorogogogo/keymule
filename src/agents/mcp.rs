@@ -900,6 +900,17 @@ impl Server {
         })
         .await
         .unwrap_or(true);
+        if let Some(why) = tokio::task::spawn_blocking(crate::vault::key_problem)
+            .await
+            .ok()
+            .flatten()
+        {
+            return Ok(tool_error(format!(
+                "keymule can't store or use secrets on this machine yet ({why}). Tell the user \
+                 exactly this, then stop:\n\n{}",
+                crate::vault::PASSPHRASE_HELP
+            )));
+        }
         if store.creds.is_empty() && store.servers.is_empty() && none_held {
             return Ok(text(
                 "No credentials stored yet. Use add_credential (services: bamboo, github, gitlab, \

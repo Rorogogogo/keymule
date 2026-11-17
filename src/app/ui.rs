@@ -415,6 +415,7 @@ fn api(ctx: &Ctx, method: &str, path: &str, body: &[u8]) -> Value {
             json!({
                 "page_mode": crate::dialog::page_mode(),
                 "pending": crate::approvals::pending(),
+                "shows": crate::approvals::shows(),
                 "devices": devices,
             })
         }

@@ -53,6 +53,10 @@ pub struct Spec<'a> {
     pub secure: bool,
     /// The secure field takes several lines (a private key).
     pub multiline: bool,
+    /// Show stored values in the page: the browser sends a one-off key to
+    /// encrypt them to (page approvals only).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub reveal: bool,
     pub timeout: u32,
 }
 
@@ -73,6 +77,7 @@ impl<'a> Spec<'a> {
             destructive: None,
             secure: false,
             multiline: false,
+            reveal: false,
             timeout: TIMEOUT_SECS,
         }
     }
@@ -312,9 +317,17 @@ pub fn reveal(
         return Ok(true);
     }
     if page_mode() {
-        anyhow::bail!(
-            "showing a secret needs this machine's screen; the keymule page doesn't show values"
+        // No screen here: show it in the paired browser, encrypted to a key
+        // only that browser holds. It asks there even with allow-all on,
+        // since the browser has to send that key.
+        let message = format!(
+            "Show \"{name}\" in this browser?\n\nOnly this browser can read it. It closes after 30 seconds."
         );
+        let spec = Spec {
+            reveal: true,
+            ..Spec::new(&message, "eye", "warn", &["Cancel", "Show"])
+        };
+        return crate::approvals::show(&spec, name, items, copy);
     }
     if ask && !platform_ask_reveal(&question)? {
         return Ok(false);

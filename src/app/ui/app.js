@@ -329,7 +329,7 @@ $('collapse').addEventListener('click', () => { collapsed = !collapsed; setPref(
 applyPrefs()
 
 const VIEWS = [
-  ['overview', 'Overview', 'home', 'Your agents use these keys without ever seeing them. Everything stays on this Mac.'],
+  ['overview', 'Overview', 'home', 'Your agents use these keys without ever seeing them. Everything stays on this machine.'],
   ['credentials', 'Credentials', 'key', 'API tokens, passwords and SSH logins your agents use through keymule. You type each one into a keymule dialog.'],
   ['servers', 'MCP servers', 'server', 'Secrets keymule hands to your MCP servers when they start, instead of keeping them in config files.'],
   ['leaks', 'Leak check', 'shield', 'Keys that already reached a model, sit in plain text, or are readable by agents.'],
@@ -352,7 +352,7 @@ function revealButton(name) {
     class: 'btn ghost', type: 'button', disabled: busy, title: 'Show the value in a keymule window, never on this page',
     onclick: e => {
       e.stopPropagation()
-      run(`reveal:${name}`, `Look for the keymule window: it asks before showing "${name}".`,
+      run(`reveal:${name}`, ap.pageMode ? `keymule asks here before showing "${name}".` : `Look for the keymule window: it asks before showing "${name}".`,
         () => api('/api/reveal', { name }))
     },
   }, busy ? 'Showing…' : 'Reveal')
@@ -613,6 +613,17 @@ function renderStats() {
 }
 
 function renderBanner() {
+  // No keychain and no passphrase: nothing can be saved, so say how to fix it first.
+  const vp = state.list?.vault_problem
+  if (vp) {
+    const [why, ...help] = vp.split('\n\n')
+    return [h('div', { class: 'callout' },
+      ico('warn'),
+      h('div', { class: 'body' },
+        h('span', { class: 'title' }, 'keymule can’t store secrets on this machine yet'),
+        h('span', { class: 'sub' }, `${why}. Set a passphrase where your agents run, then restart them:`),
+        h('pre', { class: 'plan' }, help.join('\n\n'))))]
+  }
   const p = state.plan
   if (!p || !p.has) return []
   const busy = state.busy.has('adopt')
@@ -789,7 +800,7 @@ setInterval(loadPlan, 60000)
 // public half; every answer is signed with the private one, so nothing else
 // can answer for you. A typed secret is encrypted to the asking process.
 
-const ap = { pending: [], devices: [], pageMode: false, me: null, live: false, busy: false, err: '', value: '' }
+const ap = { pending: [], devices: [], pageMode: false, me: null, live: false, busy: false, err: '', value: '', revealKeys: {} }
 
 const enc = s => new TextEncoder().encode(s)
 const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)))
@@ -841,6 +852,12 @@ async function loadApprovals() {
     ap.pageMode = !!r.page_mode
     ap.live = true
     if (ap.pageMode || ap.devices.length) await myDevice()
+    for (const sh of r.shows || []) {
+      const k = ap.revealKeys[sh.id]
+      if (!k) continue
+      delete ap.revealKeys[sh.id]
+      openShow(sh, k).then(showRevealed).catch(e => toast(`Couldn’t open the value: ${e.message}`, 'bad'))
+    }
   } catch {
     ap.live = false
   }
@@ -874,6 +891,57 @@ async function sealSecret(req, value) {
   return { epk: b64(await crypto.subtle.exportKey('raw', eph.publicKey)), iv: b64(iv), ct: b64(ct) }
 }
 
+// A value keymule encrypted for this tab after you said Show.
+async function openShow(sh, k) {
+  const asker = await crypto.subtle.importKey('raw', unb64(k.asker), { name: 'ECDH', namedCurve: 'P-256' }, false, [])
+  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: asker }, k.priv, 256))
+  const prefix = enc(`keymule-show-v1\n${sh.id}\n`)
+  const both = new Uint8Array(prefix.length + bits.length)
+  both.set(prefix); both.set(bits, prefix.length)
+  const aes = await crypto.subtle.importKey('raw', await sha256(both), 'AES-GCM', false, ['decrypt'])
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(sh.iv) }, aes, unb64(sh.ct))
+  return JSON.parse(new TextDecoder().decode(plain))
+}
+
+let revealTimer
+function closeRevealed() {
+  clearInterval(revealTimer)
+  const wrap = $('reveal')
+  wrap.hidden = true
+  wrap.replaceChildren()
+}
+function showRevealed(data) {
+  const wrap = $('reveal')
+  const until = Date.now() + 30000
+  const left = h('span', { class: 'muted' })
+  const tick = () => {
+    const s = Math.max(0, Math.ceil((until - Date.now()) / 1000))
+    left.textContent = `Closes in ${s} s`
+    if (!s) closeRevealed()
+  }
+  const copyBtn = data.copy ? h('button', {
+    class: 'btn', type: 'button',
+    onclick: async () => {
+      try { await navigator.clipboard.writeText(data.copy); copyBtn.textContent = 'Copied' } catch { copyBtn.textContent = 'Couldn’t copy' }
+    },
+  }, 'Copy') : null
+  wrap.replaceChildren(h('div', { class: 'ask', role: 'dialog', 'aria-modal': 'true', 'aria-label': `${data.name}, shown for 30 seconds` },
+    h('div', { class: 'askbrand' }, 'keymule · only this browser can read this'),
+    h('div', { class: 'askmain' },
+      h('span', { class: 'askicon' }, icon('eye')),
+      h('div', { class: 'asktext' },
+        h('h2', {}, data.name),
+        (data.items || []).map(([k, v]) => [h('p', { class: 'asklabel' }, k), h('pre', { class: 'askcode revealval' }, v)]))),
+    h('div', { class: 'askfoot' }, left, h('span', { class: 'grow' }), copyBtn,
+      h('button', { class: 'btn primary', type: 'button', onclick: closeRevealed }, 'Done'))))
+  wrap.hidden = false
+  tick()
+  clearInterval(revealTimer)
+  revealTimer = setInterval(tick, 1000)
+  wrap.querySelector('.btn.primary').focus()
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('reveal').hidden) closeRevealed() })
+
 async function answer(item, button) {
   const { req, raw } = item
   const s = req.spec
@@ -884,6 +952,13 @@ async function answer(item, button) {
     if (s.secure && button !== s.cancel) {
       if (!ap.value.trim()) { ap.err = 'Type the secret first'; ap.busy = false; renderApprovals(); return }
       secret = await sealSecret(req, ap.value)
+    }
+    if (s.reveal && button !== s.cancel) {
+      // A one-off key for keymule to encrypt the value to. Its private half
+      // stays in this tab (not extractable) and is dropped once used.
+      const eph = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits'])
+      secret = { epk: b64(await crypto.subtle.exportKey('raw', eph.publicKey)), iv: '', ct: '' }
+      ap.revealKeys[req.id] = { priv: eph.privateKey, asker: req.epk }
     }
     const sec = secret ? hexOf(await sha256(`${secret.epk}.${secret.iv}.${secret.ct}`)) : ''
     const msg = `keymule-approval-v1\n${req.id}\n${hexOf(await sha256(raw))}\n${button}\n${sec}`

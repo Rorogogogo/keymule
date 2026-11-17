@@ -352,6 +352,7 @@ select.field {
 .callout .body .title { white-space: normal; }
 .callout .body .sub { white-space: normal; margin-top: 2px; }
 .callout .acts { display: flex; gap: 8px; margin-top: 12px; }
+.callout pre.plan { white-space: pre-wrap; overflow-wrap: anywhere; }
 pre.plan {
   margin: 12px 0 0; padding: 12px 14px; overflow-x: auto; border-radius: 6px;
   background: rgb(0 0 0 / 0.04); font: 12px/1.6 var(--mono); color: var(--ink2);
@@ -486,6 +487,7 @@ pre.plan {
   white-space: pre-wrap; word-break: break-all;
 }
 .asktext > :last-child { margin-bottom: 0; }
+.askcode.revealval { font-size: 13px; color: var(--ink); user-select: all; max-height: 240px; overflow: auto; }
 .askval { display: block; width: 100%; margin-top: 12px; font-family: var(--mono); }
 .askval.multi {
   height: 120px; padding: 8px 10px; resize: none; white-space: pre; overflow: auto;

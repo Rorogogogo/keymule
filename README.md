@@ -9,27 +9,23 @@ https://github.com/user-attachments/assets/7a568e4a-df78-4e66-bde9-eceb996ad39d
 
 ## 🚀 Get started
 
-**1. Install** (macOS or Linux, no Rust needed):
+**1. Install and set up** (macOS or Linux, no Rust needed):
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Rorogogogo/keymule/releases/latest/download/keymule-installer.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Rorogogogo/keymule/main/install.sh | sh
 ```
 
-On a Mac with Homebrew you can use `brew install rorogogogo/tap/keymule` instead.
+It installs keymule, then runs `keymule init`, which finds Claude Code, Codex, Cursor, Claude
+Desktop and Antigravity and gives each one keymule's MCP server, the paste-to-save hook and a short
+note on how to use keymule. Every file it edits is backed up first. On a Mac it also puts keymule
+in the menu bar; when macOS asks whether keymule may use your keychain, enter your password and
+click **Always Allow**. In a Linux container without a keychain, it tells you to set
+`KEYMULE_PASSPHRASE` first ([details](#-linux-and-dev-containers)).
 
-**2. Set up your agents:**
+With Homebrew: `brew install rorogogogo/tap/keymule && keymule init`. To install without setting
+anything up (CI, images), add `KEYMULE_NO_INIT=1`: `curl … | KEYMULE_NO_INIT=1 sh`.
 
-```sh
-keymule init
-```
-
-It finds Claude Code, Codex, Cursor, Claude Desktop and Antigravity, and gives each one keymule's
-MCP server, the paste-to-save hook and a short note on how to use keymule. Every file it edits is
-backed up first, and `keymule init --dry-run` shows the changes without making them. On a Mac it
-also puts keymule in the menu bar. When macOS asks whether keymule may use your keychain, enter
-your password and click **Always Allow**.
-
-**3. Restart your agent and ask:**
+**2. Restart your agent and ask:**
 
 > *connect my github*
 
@@ -199,7 +195,7 @@ you approve the URL once, the first time it connects.
 
 ## 🔧 Setup details
 
-The [three steps at the top](#-get-started) are all most people need. The rest:
+The [two steps at the top](#-get-started) are all most people need. The rest:
 
 The Linux builds are static, so they run in any container (Alpine too). Each download comes with a
 checksum and a GitHub attestation of the workflow run that built it:
@@ -379,6 +375,12 @@ export KEYMULE_PASSPHRASE=…        # no system keychain in a container: unlock
 keymule ui --no-open                # in your own terminal; prints the page link and a pairing code
 ```
 
+Many containers have no D-Bus, so there's no system keychain for the vault's key. `keymule init`,
+`keymule list` and the page say so when that's the case. Set `KEYMULE_PASSPHRASE` where your agents
+run: in a dev container, `"remoteEnv": { "KEYMULE_PASSPHRASE": "${localEnv:KEYMULE_PASSPHRASE}" }`
+in `devcontainer.json` with the value set on your own machine (so it never sits in the repo), or an
+`export` in your shell profile. Use the same passphrase every time: it's what unlocks the vault.
+
 Forward port 7420 to your Mac (VS Code does it from the Ports panel), open the link it printed,
 and click **Pair this browser** with the code. From then on, when an agent needs your OK or a new
 secret, the question appears on the page: Allow, Cancel, Today / Always for allow-all, or a field
@@ -390,6 +392,9 @@ to type the secret into.
   you. A second browser can only pair after an already paired one allows it.
 - **Typed secrets are encrypted** to the keymule process that asked, so they never sit in a file
   in the clear.
+- **Reveal works here too.** After you click Show, keymule encrypts the value to a one-off key
+  that only that browser tab holds. The page shows it for 30 seconds; the server and its files
+  only ever see ciphertext.
 - **The limit:** in a container the vault's key is the passphrase in the environment, which the
   agent can read too. So an agent that deliberately decrypts the vault itself can get at the
   secrets. Page approvals guard keymule's own ways of using them, the same trade-off as allow-all.

@@ -98,6 +98,14 @@ pub fn run(dry_run: bool) -> Result<()> {
         )
     };
 
+    // Nothing can be saved without somewhere for the vault's key: say so
+    // first, loudly, then set up the agents anyway (they work once it's set).
+    let key_problem = crate::vault::key_problem();
+    if let Some(why) = &key_problem {
+        println!("⚠ keymule can't store secrets on this machine yet ({why}).\n");
+        println!("{}\n", crate::vault::PASSPHRASE_HELP);
+    }
+
     println!("Claude Code");
     // 1. MCP server
     let has_claude = Command::new("claude").arg("--version").output().is_ok();
@@ -206,8 +214,8 @@ pub fn run(dry_run: bool) -> Result<()> {
         // Without a screen the question waits in the keymule page, and until
         // a browser is paired nobody can answer it: don't hold up setup (or
         // an install script) for three minutes. It's offered next time.
-        let nobody_to_ask =
-            crate::dialog::page_mode() && crate::approvals::devices(vault.as_ref()).is_empty();
+        let nobody_to_ask = key_problem.is_some()
+            || (crate::dialog::page_mode() && crate::approvals::devices(vault.as_ref()).is_empty());
         let offered = if nobody_to_ask {
             Ok(None)
         } else {
@@ -227,6 +235,12 @@ pub fn run(dry_run: bool) -> Result<()> {
             ),
             Err(e) => println!("· couldn't offer allow-all ({e}); run: keymule allow --dir ~"),
         }
+    }
+    if key_problem.is_some() && !dry_run {
+        anyhow::bail!(
+            "setup isn't finished: set KEYMULE_PASSPHRASE (see the top of this output), \
+             restart your agent, then run keymule init again"
+        );
     }
     if !dry_run {
         println!(

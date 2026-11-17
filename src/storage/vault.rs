@@ -44,6 +44,40 @@ struct Envelope {
     data: String,
 }
 
+/// What to do when there's no system keychain and no passphrase.
+pub const PASSPHRASE_HELP: &str = "\
+No system keychain here (no D-Bus Secret Service), so keymule has nowhere to keep its vault key.
+Pick a passphrase and set KEYMULE_PASSPHRASE wherever your agents run:
+  dev container  in devcontainer.json:  \"remoteEnv\": { \"KEYMULE_PASSPHRASE\": \"${localEnv:KEYMULE_PASSPHRASE}\" }
+                 (and set it on your own machine, so it never sits in the repo)
+  shell          echo 'export KEYMULE_PASSPHRASE=...' >> ~/.bashrc
+Use the same passphrase every time: it is what unlocks the vault.
+Then restart your agent and run: keymule init";
+
+/// Why keymule can't keep secrets on this machine yet, if it can't: no
+/// system keychain to hold the vault's key, and no `KEYMULE_PASSPHRASE`.
+/// (Containers often have no D-Bus, so no Secret Service.)
+pub fn key_problem() -> Option<String> {
+    if std::env::var("KEYMULE_PASSPHRASE").is_ok_and(|p| !p.is_empty()) {
+        return None;
+    }
+    #[cfg(debug_assertions)]
+    if std::env::var_os("KEYMULE_TEST_VAULT").is_some() {
+        return None;
+    }
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        return None;
+    }
+    let entry = match keyring::Entry::new(KEYCHAIN_SERVICE, KEY_ITEM) {
+        Ok(e) => e,
+        Err(e) => return Some(e.to_string()),
+    };
+    match entry.get_password() {
+        Ok(_) | Err(keyring::Error::NoEntry) => None,
+        Err(e) => Some(e.to_string()),
+    }
+}
+
 pub enum KeySource {
     Keychain,
     Passphrase(String),

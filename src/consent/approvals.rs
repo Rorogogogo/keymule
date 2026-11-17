@@ -173,10 +173,37 @@ pub fn verify(devices: &[Device], id: &str, request: &str, reply: &Reply) -> Res
 
 /// The AES key both sides derive from the ECDH secret.
 fn aes_key(id: &str, shared: &[u8]) -> [u8; 32] {
+    derive("keymule-secret-v1", id, shared)
+}
+
+fn derive(domain: &str, id: &str, shared: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(format!("keymule-secret-v1\n{id}\n").as_bytes());
+    h.update(format!("{domain}\n{id}\n").as_bytes());
     h.update(shared);
     h.finalize().into()
+}
+
+/// Encrypt `plain` for the browser that sent `browser_epk`, with this
+/// process's one-off key `sk`. Returns (iv, ciphertext), base64.
+fn seal_for_browser(
+    sk: &p256::SecretKey,
+    id: &str,
+    browser_epk: &str,
+    plain: &[u8],
+) -> Result<(String, String)> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    let epk = p256::PublicKey::from_sec1_bytes(&B64.decode(browser_epk)?)
+        .map_err(|_| anyhow!("bad key from the page"))?;
+    let shared = p256::ecdh::diffie_hellman(sk.to_nonzero_scalar(), epk.as_affine());
+    let key = derive("keymule-show-v1", id, shared.raw_secret_bytes().as_slice());
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).map_err(|_| anyhow!("bad key"))?;
+    let mut iv = [0u8; 12];
+    getrandom::fill(&mut iv).map_err(|e| anyhow!("no randomness: {e}"))?;
+    let nonce = aes_gcm::Nonce::try_from(iv.as_slice()).map_err(|_| anyhow!("bad nonce"))?;
+    let ct = cipher
+        .encrypt(&nonce, plain)
+        .map_err(|_| anyhow!("encryption failed"))?;
+    Ok((B64.encode(iv), B64.encode(ct)))
 }
 
 fn open_secret(sk: &p256::SecretKey, id: &str, s: &SealedSecret) -> Result<String> {
@@ -197,6 +224,91 @@ fn open_secret(sk: &p256::SecretKey, id: &str, s: &SealedSecret) -> Result<Strin
 /// Ask in the page and wait for a signed answer. None if nobody answered in
 /// time.
 pub fn ask(spec: &Spec) -> Result<Option<Picked>> {
+    let Some((id, sk, r)) = ask_signed(spec)? else {
+        return Ok(None);
+    };
+    let text = match (&sk, &r.secret) {
+        (Some(k), Some(s)) if spec.secure => Some(open_secret(k, &id, s)?),
+        _ => None,
+    };
+    Ok(Some(Picked {
+        button: r.button,
+        text,
+    }))
+}
+
+/// How long revealed values stay readable in the page.
+const SHOW_SECS: u64 = 30;
+
+/// Show stored values in the paired browser: ask there, and on Show,
+/// encrypt them to the one-off key the browser sent with its signed answer.
+/// Only a `{id}.show.json` with ciphertext is written, and removed again
+/// after 30 seconds. Returns false if the user didn't say Show.
+pub fn show(
+    spec: &Spec,
+    name: &str,
+    items: &[(String, String)],
+    copy: Option<&str>,
+) -> Result<bool> {
+    let Some((id, Some(sk), r)) = ask_signed(spec)? else {
+        return Ok(false);
+    };
+    if r.button != "Show" {
+        return Ok(false);
+    }
+    let epk = r
+        .secret
+        .as_ref()
+        .map(|s| s.epk.clone())
+        .ok_or_else(|| anyhow!("the page didn't send a key to show it with"))?;
+    let plain = serde_json::to_vec(&json!({ "name": name, "items": items, "copy": copy }))?;
+    let (iv, ct) = seal_for_browser(&sk, &id, &epk, &plain)?;
+    let path = dir()?.join(format!("{id}.show.json"));
+    let expires = crate::trust::now() + SHOW_SECS;
+    write_atomic(
+        &path,
+        &serde_json::to_string(&json!({ "id": id, "iv": iv, "ct": ct, "expires": expires }))?,
+    )?;
+    std::thread::sleep(Duration::from_secs(SHOW_SECS));
+    let _ = std::fs::remove_file(&path);
+    Ok(true)
+}
+
+/// Values waiting to be shown in the page, still encrypted.
+pub fn shows() -> Vec<serde_json::Value> {
+    let Ok(d) = dir() else { return vec![] };
+    let Ok(entries) = std::fs::read_dir(&d) else {
+        return vec![];
+    };
+    let now = crate::trust::now();
+    let mut out = vec![];
+    for e in entries.flatten() {
+        let path = e.path();
+        if !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".show.json"))
+        {
+            continue;
+        }
+        let Some(v) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        else {
+            continue;
+        };
+        if v["expires"].as_u64().unwrap_or(0) <= now {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        out.push(v);
+    }
+    out
+}
+
+/// Ask and wait for a signed answer: the question's id, this process's
+/// one-off key (for typed or revealed secrets), and the answer.
+fn ask_signed(spec: &Spec) -> Result<Option<(String, Option<p256::SecretKey>, Reply)>> {
     let vault = crate::store::vault();
     let devs = devices(vault.as_ref());
     if devs.is_empty() {
@@ -207,7 +319,7 @@ pub fn ask(spec: &Spec) -> Result<Option<Picked>> {
         );
     }
     let id = random_id()?;
-    let sk = if spec.secure {
+    let sk = if spec.secure || spec.reveal {
         use p256::elliptic_curve::Generate;
         Some(p256::SecretKey::generate())
     } else {
@@ -243,16 +355,7 @@ pub fn ask(spec: &Spec) -> Result<Option<Picked>> {
                 .map_err(|e| anyhow!("{e}"))
                 .and_then(|r| verify(&devs, &id, &request, &r).map(|_| r));
             match checked {
-                Ok(r) if spec.buttons.contains(&r.button.as_str()) => {
-                    let text = match (&sk, &r.secret) {
-                        (Some(k), Some(s)) => Some(open_secret(k, &id, s)?),
-                        _ => None,
-                    };
-                    break Some(Picked {
-                        button: r.button,
-                        text,
-                    });
-                }
+                Ok(r) if spec.buttons.contains(&r.button.as_str()) => break Some(r),
                 Ok(_) => {}
                 Err(e) => crate::http::audit("-", "BAD-APPROVAL", &format!("{id}: {e}"), 0),
             }
@@ -260,7 +363,7 @@ pub fn ask(spec: &Spec) -> Result<Option<Picked>> {
         std::thread::sleep(Duration::from_millis(250));
     };
     let _ = std::fs::remove_file(&req_path);
-    Ok(picked)
+    Ok(picked.map(|r| (id, sk, r)))
 }
 
 /// The questions waiting now, exactly as written (the page signs over
@@ -396,6 +499,38 @@ mod tests {
         );
         let stranger = p256::SecretKey::generate();
         assert!(open_secret(&stranger, "id1", &sealed).is_err());
+    }
+
+    #[test]
+    fn a_shown_value_only_opens_in_the_browser_that_asked() {
+        use aes_gcm::aead::{Aead, KeyInit};
+        use p256::elliptic_curve::Generate;
+        let keymule = p256::SecretKey::generate();
+        let browser = p256::SecretKey::generate();
+        let bpk = B64.encode(browser.public_key().to_sec1_bytes());
+        let (iv, ct) = seal_for_browser(&keymule, "id1", &bpk, b"tok_123").unwrap();
+        // What the page does: ECDH with keymule's one-off public key.
+        let open = |sk: &p256::SecretKey, id: &str| {
+            let shared = p256::ecdh::diffie_hellman(
+                sk.to_nonzero_scalar(),
+                keymule.public_key().as_affine(),
+            );
+            let key = derive("keymule-show-v1", id, shared.raw_secret_bytes().as_slice());
+            let iv = B64.decode(&iv).unwrap();
+            aes_gcm::Aes256Gcm::new_from_slice(&key)
+                .unwrap()
+                .decrypt(
+                    &aes_gcm::Nonce::try_from(iv.as_slice()).unwrap(),
+                    B64.decode(&ct).unwrap().as_slice(),
+                )
+                .ok()
+        };
+        assert_eq!(open(&browser, "id1").as_deref(), Some(&b"tok_123"[..]));
+        assert!(open(&browser, "id2").is_none(), "bound to the question");
+        assert!(
+            open(&p256::SecretKey::generate(), "id1").is_none(),
+            "only that browser"
+        );
     }
 
     #[test]
