@@ -45,11 +45,11 @@ export function Security() {
         </Reveal>
       </div>
       <Reveal delay={0.1} className="mt-4">
-        <div className="panel overflow-hidden rounded-3xl">
+        <div className="dark-scope window overflow-hidden rounded-3xl">
           <div className="flex items-center gap-2 border-b border-line px-5 py-3">
-            <span className="size-2.5 rounded-full bg-white/15" />
-            <span className="size-2.5 rounded-full bg-white/15" />
-            <span className="size-2.5 rounded-full bg-white/15" />
+            <span className="size-2.5 rounded-full bg-tint/15" />
+            <span className="size-2.5 rounded-full bg-tint/15" />
+            <span className="size-2.5 rounded-full bg-tint/15" />
             <span className="ml-3 font-mono text-[12px] text-fg-3">keymule doctor · made-up values</span>
           </div>
           <pre className="overflow-x-auto p-6 font-mono text-[12.5px] leading-[1.85] text-fg-2 [scrollbar-width:none]">
@@ -72,7 +72,7 @@ export function Install() {
       <Reveal className="beam relative isolate mx-auto max-w-5xl overflow-hidden rounded-[28px] border border-line px-6 py-16 text-center sm:px-12 sm:py-20">
         <div
           className="pointer-events-none absolute inset-0 -z-10"
-          style={{ background: 'radial-gradient(ellipse 80% 70% at 50% 0%, rgb(139 123 255 / 0.22), transparent 70%), #0e0f11' }}
+          style={{ background: 'radial-gradient(ellipse 80% 70% at 50% 0%, var(--glow), transparent 70%), var(--color-bg-2)' }}
           aria-hidden="true"
         />
         <p className="eyebrow">Get started</p>
@@ -113,7 +113,7 @@ export function Faq() {
       <div className="border-t border-line">
         {FAQ.map(([q, a]) => (
           <details key={q} className="group border-b border-line">
-            <summary className="flex cursor-pointer items-center justify-between gap-6 py-5 text-[17px] font-medium tracking-tight transition-colors hover:text-white">
+            <summary className="flex cursor-pointer items-center justify-between gap-6 py-5 text-[17px] font-medium tracking-tight transition-colors hover:text-fg">
               {q}
               <Plus className="size-5 shrink-0 text-fg-3 transition-transform duration-300 group-open:rotate-45" />
             </summary>
@@ -139,7 +139,7 @@ export function Footer() {
           </div>
           <a
             href={GITHUB}
-            className="panel inline-flex h-10 items-center gap-2 rounded-full px-4 text-sm font-medium transition-colors hover:bg-white/10"
+            className="panel inline-flex h-10 items-center gap-2 rounded-full px-4 text-sm font-medium transition-colors hover:bg-tint/10"
           >
             <GithubIcon /> Star on GitHub
           </a>
@@ -155,7 +155,7 @@ export function Footer() {
       </div>
       <p
         className="pointer-events-none -mb-[0.22em] text-center text-[clamp(80px,19vw,280px)] leading-none font-semibold tracking-[-0.06em] select-none"
-        style={{ background: 'linear-gradient(180deg, rgb(255 255 255 / 0.10), transparent 85%)', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }}
+        style={{ background: 'linear-gradient(180deg, color-mix(in srgb, var(--color-fg) 9%, transparent), transparent 85%)', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }}
         aria-hidden="true"
       >
         keymule

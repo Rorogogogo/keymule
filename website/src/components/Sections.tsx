@@ -73,7 +73,7 @@ function DialogVisual() {
           <p className="mt-1 text-[13px] text-fg-2">It will only be sent to api.github.com.</p>
         </div>
       </div>
-      <div className="mt-5 flex h-10 items-center rounded-lg border border-line-2 bg-black/30 px-3 font-mono tracking-[0.2em] text-fg-2">
+      <div className="mt-5 flex h-10 items-center rounded-lg border border-line-2 bg-tint/[0.03] px-3 font-mono tracking-[0.2em] text-fg-2">
         ●●●●●●●●●●●●●●●●<span className="blink ml-0.5 tracking-normal text-accent">|</span>
       </div>
       <div className="mt-5 flex justify-end gap-2 text-[13px]">
@@ -104,7 +104,7 @@ function ManifestVisual() {
             <p className="truncate text-[12px] text-fg-3">{d}</p>
           </div>
           <span className="font-mono text-[12px] text-fg-2">{h}</span>
-          <span className="rounded-md bg-white/[0.06] px-2 py-0.5 font-mono text-[11px] text-fg-3">no value</span>
+          <span className="rounded-md bg-tint/[0.06] px-2 py-0.5 font-mono text-[11px] text-fg-3">no value</span>
         </div>
       ))}
     </div>
@@ -113,11 +113,11 @@ function ManifestVisual() {
 
 function RedactVisual() {
   return (
-    <div className="window mx-auto w-full max-w-[460px] overflow-hidden rounded-2xl font-mono text-[12.5px]">
+    <div className="dark-scope window mx-auto w-full max-w-[460px] overflow-hidden rounded-2xl font-mono text-[12.5px]">
       <div className="flex items-center gap-1.5 border-b border-line px-4 py-3">
-        <span className="size-2 rounded-full bg-white/15" />
-        <span className="size-2 rounded-full bg-white/15" />
-        <span className="size-2 rounded-full bg-white/15" />
+        <span className="size-2 rounded-full bg-tint/15" />
+        <span className="size-2 rounded-full bg-tint/15" />
+        <span className="size-2 rounded-full bg-tint/15" />
         <span className="ml-2 text-[11px] text-fg-3">request · keymule</span>
       </div>
       <div className="space-y-1.5 p-5 leading-relaxed">
@@ -129,7 +129,7 @@ function RedactVisual() {
         <p className="pt-3 text-fg-2">200 OK</p>
         <p className="text-fg-3">{'{ "workflow_runs": [{ "id": 482, "conclusion": "failure", … }] }'}</p>
         <p className="pt-3 text-fg-3">
-          token in the reply? <span className="rounded bg-white/10 px-1 text-fg-2">[redacted]</span>
+          token in the reply? <span className="rounded bg-tint/10 px-1 text-fg-2">[redacted]</span>
           <span className="ml-2 text-[11px] text-accent">→ what the agent gets</span>
         </p>
       </div>
@@ -165,7 +165,7 @@ export function How() {
           ))}
         </ol>
         <div className="hidden lg:block">
-          <div className="sticky top-[22vh] flex h-[56vh] items-center justify-center rounded-3xl border border-line bg-[radial-gradient(60%_60%_at_50%_40%,rgb(139_123_255/0.12),transparent)] p-8">
+          <div className="sticky top-[22vh] flex h-[56vh] items-center justify-center rounded-3xl border border-line bg-[radial-gradient(60%_60%_at_50%_40%,var(--glow),transparent)] p-8">
             <AnimatePresence mode="wait">
               <motion.div
                 key={active}
@@ -256,7 +256,7 @@ function PasteArt() {
 
 function ExecArt() {
   return (
-    <div className="flex h-full flex-col justify-center rounded-xl border border-line bg-black/40 p-4 font-mono text-[11.5px] leading-relaxed">
+    <div className="dark-scope flex h-full flex-col justify-center rounded-xl border border-line bg-bg-2 p-4 font-mono text-[11.5px] leading-relaxed text-fg">
       <p className="text-fg">
         <span className="text-fg-3">$</span> keymule exec github -- gh auth status
       </p>
@@ -292,7 +292,7 @@ function ScanArt() {
         <span className="text-[13px] text-fg-2">Reading agent transcripts</span>
         <span className="font-mono text-[12px] text-fg-3">{mb} / 617 MB</span>
       </div>
-      <div className="h-1 overflow-hidden rounded-full bg-white/[0.08]">
+      <div className="h-1 overflow-hidden rounded-full bg-tint/[0.08]">
         <div className="h-full rounded-full bg-gradient-to-r from-accent-2 to-accent" style={{ width: `${(mb / 617) * 100}%` }} />
       </div>
       <div className="flex gap-6 pt-1 font-mono text-[12px]">
@@ -356,7 +356,7 @@ export function Features() {
         {FEATURES.map((f, i) => (
           <Reveal key={f.title} delay={(i % 3) * 0.05} className={f.span}>
             <article onMouseMove={spotlight} className="spot panel flex h-full flex-col overflow-hidden rounded-2xl">
-              <div className="h-44 border-b border-line bg-[radial-gradient(80%_80%_at_50%_0%,rgb(255_255_255/0.03),transparent)] p-6">{f.art}</div>
+              <div className="h-44 border-b border-line bg-bg-2/60 p-6">{f.art}</div>
               <div className="p-6">
                 <h3 className="text-[16px] font-semibold tracking-tight">{f.title}</h3>
                 <p className="mt-1.5 text-[14.5px] leading-relaxed text-fg-2">{f.body}</p>

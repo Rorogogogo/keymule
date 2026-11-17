@@ -27,9 +27,9 @@ export function Reveal({ children, delay = 0, className }: { children: ReactNode
 export function Logo({ className = 'size-7' }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
-      <rect width="24" height="24" rx="6" fill="#f4f4f6" />
-      <circle cx="12" cy="9.6" r="3.3" fill="#07070a" />
-      <path d="M10.3 11.8 9.4 17.6h5.2l-.9-5.8z" fill="#07070a" />
+      <rect width="24" height="24" rx="6" fill="var(--color-fg)" />
+      <circle cx="12" cy="9.6" r="3.3" fill="var(--color-bg)" />
+      <path d="M10.3 11.8 9.4 17.6h5.2l-.9-5.8z" fill="var(--color-bg)" />
     </svg>
   )
 }
@@ -55,7 +55,7 @@ const TONES = {
   ok: 'text-ok bg-ok/10 ring-ok/25',
   warn: 'text-warn bg-warn/10 ring-warn/25',
   bad: 'text-bad bg-bad/10 ring-bad/25',
-  muted: 'text-fg-2 bg-white/5 ring-white/10',
+  muted: 'text-fg-2 bg-tint/5 ring-tint/10',
 } as const
 
 export function Tag({ children, tone = 'muted' }: { children: ReactNode; tone?: keyof typeof TONES }) {
@@ -98,7 +98,7 @@ export function CopyCommand({ command = INSTALL }: { command?: string }) {
         type="button"
         onClick={copy}
         aria-label={copied ? 'Copied' : 'Copy the install command'}
-        className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-white/[0.08] px-3 font-sans text-[13px] font-medium text-fg ring-1 ring-white/10 ring-inset transition-colors hover:bg-white/[0.14]"
+        className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-tint/[0.08] px-3 font-sans text-[13px] font-medium text-fg ring-1 ring-tint/10 ring-inset transition-colors hover:bg-tint/[0.14]"
       >
         {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
         {copied ? 'Copied' : 'Copy'}

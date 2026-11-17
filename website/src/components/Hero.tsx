@@ -1,9 +1,35 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, useReducedMotion, useScroll, useTransform, type MotionValue } from 'motion/react'
-import { ArrowRight, KeyRound, Lock } from 'lucide-react'
+import { ArrowRight, KeyRound, Lock, Moon, Sun } from 'lucide-react'
 import { CopyCommand, GITHUB, GithubIcon, Logo } from './ui'
 
 const EASE = [0.22, 1, 0.36, 1] as const
+
+function ThemeToggle() {
+  const [dark, setDark] = useState(() => document.documentElement.dataset.theme === 'dark')
+  const flip = () => {
+    const next = !dark
+    setDark(next)
+    if (next) document.documentElement.dataset.theme = 'dark'
+    else delete document.documentElement.dataset.theme
+    try {
+      localStorage.setItem('km-theme', next ? 'dark' : 'light')
+    } catch {
+      /* private mode: just this visit */
+    }
+  }
+  return (
+    <button
+      type="button"
+      onClick={flip}
+      aria-label={dark ? 'Switch to light' : 'Switch to dark'}
+      title={dark ? 'Light' : 'Dark'}
+      className="flex size-9 items-center justify-center rounded-full text-fg-2 transition-colors hover:bg-tint/5 hover:text-fg"
+    >
+      {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
+    </button>
+  )
+}
 
 export function Nav() {
   const [scrolled, setScrolled] = useState(false)
@@ -24,7 +50,7 @@ export function Nav() {
       <nav
         aria-label="Main"
         className={`flex h-12 w-full max-w-5xl items-center gap-6 rounded-full pr-1.5 pl-4 transition-[background-color,box-shadow,border-color] duration-300 ${
-          scrolled ? 'border border-line bg-bg-2/75 shadow-[0_8px_30px_rgb(0_0_0/0.5)] backdrop-blur-xl' : 'border border-transparent'
+          scrolled ? 'border border-line bg-bg/75 shadow-[0_8px_30px_rgb(0_0_0/0.12)] backdrop-blur-xl' : 'border border-transparent'
         }`}
       >
         <a href="#top" className="flex items-center gap-2 text-[15px] font-semibold tracking-tight">
@@ -39,6 +65,7 @@ export function Nav() {
           ))}
         </div>
         <div className="ml-auto flex items-center gap-1">
+          <ThemeToggle />
           <a href={GITHUB} className="hidden h-9 items-center gap-2 rounded-full px-3 text-[13.5px] text-fg-2 transition-colors hover:text-fg sm:flex">
             <GithubIcon /> GitHub
           </a>
@@ -54,11 +81,11 @@ export function Nav() {
 /** The agent's side: a terminal where the request goes out by name. */
 function TerminalCard() {
   return (
-    <div className="window w-[340px] overflow-hidden rounded-xl text-left">
+    <div className="dark-scope window w-[340px] overflow-hidden rounded-xl text-left">
       <div className="flex items-center gap-1.5 border-b border-line px-3.5 py-2.5">
-        <span className="size-2 rounded-full bg-white/15" />
-        <span className="size-2 rounded-full bg-white/15" />
-        <span className="size-2 rounded-full bg-white/15" />
+        <span className="size-2 rounded-full bg-tint/15" />
+        <span className="size-2 rounded-full bg-tint/15" />
+        <span className="size-2 rounded-full bg-tint/15" />
         <span className="ml-2 font-mono text-[11px] text-fg-3">claude · ~/code/acme</span>
       </div>
       <div className="space-y-2.5 p-4 font-mono text-[11.5px] leading-relaxed">
@@ -74,7 +101,7 @@ function TerminalCard() {
           <span className="pl-4">path="/repos/acme/app/actions/runs")</span>
         </p>
         <p className="text-fg-3">
-          ⎿ 200 · Authorization: Bearer <span className="rounded bg-white/10 px-1 text-fg-2">[redacted]</span>
+          ⎿ 200 · Authorization: Bearer <span className="rounded bg-tint/10 px-1 text-fg-2">[redacted]</span>
         </p>
         <p className="text-fg">
           Run #482 failed in integration tests<span className="blink">▍</span>
@@ -102,7 +129,7 @@ function DialogCard() {
           </p>
         </div>
       </div>
-      <div className="mt-3.5 flex h-8 items-center rounded-lg border border-line-2 bg-black/30 px-3 font-mono text-[13px] tracking-[0.2em] text-fg-2">
+      <div className="mt-3.5 flex h-8 items-center rounded-lg border border-line-2 bg-tint/[0.03] px-3 font-mono text-[13px] tracking-[0.2em] text-fg-2">
         ●●●●●●●●●●●●●●<span className="blink ml-0.5 tracking-normal text-accent">|</span>
       </div>
       <div className="mt-3.5 flex justify-end gap-2 text-[12px]">
@@ -137,14 +164,14 @@ export function Hero() {
       {/* Light from above, and the horizon line the product sits on. */}
       <div
         className="pointer-events-none absolute inset-x-0 top-0 h-[900px]"
-        style={{ background: 'radial-gradient(60% 50% at 50% 0%, rgb(139 123 255 / 0.18), transparent 70%)' }}
+        style={{ background: 'radial-gradient(60% 50% at 50% 0%, var(--glow), transparent 70%)' }}
         aria-hidden="true"
       />
       <div className="relative mx-auto max-w-5xl px-5 text-center sm:px-8">
         <motion.a
           {...rise(0)}
           href={`${GITHUB}/releases/latest`}
-          className="group inline-flex items-center gap-2 rounded-full border border-line bg-white/[0.03] py-1 pr-3 pl-3 text-[13px] text-fg-2 transition-colors hover:border-line-2 hover:text-fg"
+          className="group inline-flex items-center gap-2 rounded-full border border-line bg-tint/[0.03] py-1 pr-3 pl-3 text-[13px] text-fg-2 transition-colors hover:border-line-2 hover:text-fg"
         >
           <span className="size-1.5 rounded-full bg-accent shadow-[0_0_10px_var(--color-accent)]" />
           v0.18 · Reveal now works in dev containers
@@ -165,7 +192,7 @@ export function Hero() {
           </a>
           <a
             href={GITHUB}
-            className="flex h-11 items-center gap-2 rounded-full border border-line-2 bg-white/[0.03] px-5 text-[15px] font-medium text-fg transition-colors hover:bg-white/[0.07]"
+            className="flex h-11 items-center gap-2 rounded-full border border-line-2 bg-tint/[0.03] px-5 text-[15px] font-medium text-fg transition-colors hover:bg-tint/[0.07]"
           >
             <GithubIcon /> View on GitHub
           </a>
@@ -179,8 +206,8 @@ export function Hero() {
         {/* horizon */}
         <div className="pointer-events-none absolute -top-24 left-1/2 h-[600px] w-[1400px] -translate-x-1/2" aria-hidden="true">
           <div
-            className="absolute inset-0 rounded-[100%] border-t border-white/20"
-            style={{ boxShadow: '0 -20px 80px -20px rgb(139 123 255 / 0.55) inset', maskImage: 'linear-gradient(90deg, transparent, black 25%, black 75%, transparent)' }}
+            className="absolute inset-0 rounded-[100%] border-t border-tint/15"
+            style={{ boxShadow: '0 -20px 80px -20px color-mix(in srgb, var(--color-accent) 45%, transparent) inset', maskImage: 'linear-gradient(90deg, transparent, black 25%, black 75%, transparent)' }}
           />
         </div>
         <motion.div
@@ -191,18 +218,19 @@ export function Hero() {
         >
           <motion.div style={{ y: far }} className="window relative overflow-hidden rounded-2xl">
             <div className="flex items-center gap-1.5 border-b border-line bg-bg-3/60 px-4 py-3">
-              <span className="size-2.5 rounded-full bg-white/12" />
-              <span className="size-2.5 rounded-full bg-white/12" />
-              <span className="size-2.5 rounded-full bg-white/12" />
+              <span className="size-2.5 rounded-full bg-tint/12" />
+              <span className="size-2.5 rounded-full bg-tint/12" />
+              <span className="size-2.5 rounded-full bg-tint/12" />
               <span className="mx-auto font-mono text-[11px] text-fg-3">keymule</span>
             </div>
             <img
-              src="/app-dark.png"
+              src="/app-light.png"
               alt="The keymule page: credentials with their hosts, one opened to show its note, and live activity"
-              className="block w-full"
+              className="only-light block w-full"
               width={2640}
               height={1640}
             />
+            <img src="/app-dark.png" alt="" aria-hidden="true" className="only-dark block w-full" width={2640} height={1640} />
             <div className="pointer-events-none absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-bg via-bg/60 to-transparent" />
           </motion.div>
           <Floating y={near} className="-left-10 bottom-16">
