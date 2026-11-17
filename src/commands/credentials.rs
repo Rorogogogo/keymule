@@ -158,6 +158,12 @@ pub(super) async fn add_ssh(
 }
 
 pub(super) fn list() -> Result<()> {
+    if let Some(why) = crate::vault::key_problem() {
+        eprintln!(
+            "⚠ keymule can't store secrets here yet ({why}).\n{}\n",
+            crate::vault::PASSPHRASE_HELP
+        );
+    }
     let store = Store::load()?;
     if store.creds.is_empty() && store.servers.is_empty() {
         println!("No credentials yet. Try: keymule add bamboo");
@@ -290,6 +296,8 @@ pub(super) fn list_json() -> Result<()> {
         serde_json::to_string_pretty(&serde_json::json!({
             "credentials": creds,
             "servers": servers,
+            "vault_problem": crate::vault::key_problem()
+                .map(|why| format!("{why}\n\n{}", crate::vault::PASSPHRASE_HELP)),
             "audit_log": store::config_dir()?.join("audit.log"),
         }))?
     );
