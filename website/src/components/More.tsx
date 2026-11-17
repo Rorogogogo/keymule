@@ -20,7 +20,7 @@ export function Security() {
       <SectionHead kicker="Security, said plainly" title="What keymule guards, and what it doesn’t." />
       <div className="mt-14 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
         <Reveal>
-          <div onMouseMove={spotlight} className="spot glass h-full rounded-3xl p-8">
+          <div onMouseMove={spotlight} className="spot panel h-full rounded-3xl p-8">
             <Tag tone="ok">Guarded</Tag>
             <ul className="mt-6 space-y-4">
               {GUARDS.map(g => (
@@ -45,7 +45,7 @@ export function Security() {
         </Reveal>
       </div>
       <Reveal delay={0.1} className="mt-4">
-        <div className="glass overflow-hidden rounded-3xl">
+        <div className="panel overflow-hidden rounded-3xl">
           <div className="flex items-center gap-2 border-b border-line px-5 py-3">
             <span className="size-2.5 rounded-full bg-white/15" />
             <span className="size-2.5 rounded-full bg-white/15" />
@@ -69,14 +69,14 @@ export function Security() {
 export function Install() {
   return (
     <section id="install" className="px-5 py-24 sm:px-8 lg:py-32">
-      <Reveal className="relative mx-auto max-w-5xl overflow-hidden rounded-[32px] border border-line px-6 py-16 text-center sm:px-12 sm:py-20">
+      <Reveal className="beam relative isolate mx-auto max-w-5xl overflow-hidden rounded-[28px] border border-line px-6 py-16 text-center sm:px-12 sm:py-20">
         <div
           className="pointer-events-none absolute inset-0 -z-10"
-          style={{ background: 'radial-gradient(ellipse 80% 70% at 50% 0%, rgb(139 123 255 / 0.28), transparent 70%), #0c0c11' }}
+          style={{ background: 'radial-gradient(ellipse 80% 70% at 50% 0%, rgb(139 123 255 / 0.22), transparent 70%), #0e0f11' }}
           aria-hidden="true"
         />
-        <p className="kicker">Get started</p>
-        <h2 className="headline mt-4 text-[clamp(36px,5.2vw,64px)]">Set up in about a minute.</h2>
+        <p className="eyebrow">Get started</p>
+        <h2 className="headline mt-5 text-[clamp(32px,4.2vw,52px)]">Set up in about a minute.</h2>
         <p className="mx-auto mt-5 max-w-xl text-lg leading-relaxed text-fg-2">
           One command installs keymule and connects Claude Code, Codex, Cursor, Claude Desktop and Antigravity. Every file it edits is
           backed up first.
@@ -139,7 +139,7 @@ export function Footer() {
           </div>
           <a
             href={GITHUB}
-            className="glass inline-flex h-10 items-center gap-2 rounded-full px-4 text-sm font-medium transition-colors hover:bg-white/10"
+            className="panel inline-flex h-10 items-center gap-2 rounded-full px-4 text-sm font-medium transition-colors hover:bg-white/10"
           >
             <GithubIcon /> Star on GitHub
           </a>

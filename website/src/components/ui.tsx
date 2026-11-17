@@ -69,9 +69,9 @@ export function Tag({ children, tone = 'muted' }: { children: ReactNode; tone?: 
 export function SectionHead({ kicker, title, children, center = false }: { kicker: string; title: ReactNode; children?: ReactNode; center?: boolean }) {
   return (
     <Reveal className={center ? 'mx-auto max-w-3xl text-center' : 'max-w-3xl'}>
-      <p className="kicker">{kicker}</p>
-      <h2 className="headline mt-4 text-[clamp(34px,4.6vw,56px)]">{title}</h2>
-      {children && <p className={`mt-5 text-lg leading-relaxed text-fg-2 ${center ? 'mx-auto max-w-2xl' : 'max-w-2xl'}`}>{children}</p>}
+      <p className="eyebrow">{kicker}</p>
+      <h2 className="headline mt-5 text-[clamp(32px,4.2vw,52px)]">{title}</h2>
+      {children && <p className={`mt-5 text-[17px] leading-relaxed text-fg-2 ${center ? 'mx-auto max-w-xl' : 'max-w-xl'}`}>{children}</p>}
     </Reveal>
   )
 }
@@ -89,8 +89,8 @@ export function CopyCommand({ command = INSTALL }: { command?: string }) {
     }
   }
   return (
-    <div className="glass flex w-full items-center gap-3 rounded-2xl py-2 pr-2 pl-4 font-mono text-[13px] backdrop-blur-xl">
-      <span className="text-accent" aria-hidden="true">
+    <div className="panel flex w-full items-center gap-3 rounded-xl py-1.5 pr-1.5 pl-4 font-mono text-[13px] backdrop-blur-xl">
+      <span className="text-fg-3" aria-hidden="true">
         $
       </span>
       <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-left text-fg [scrollbar-width:none] select-all">{command}</code>
@@ -98,7 +98,7 @@ export function CopyCommand({ command = INSTALL }: { command?: string }) {
         type="button"
         onClick={copy}
         aria-label={copied ? 'Copied' : 'Copy the install command'}
-        className="flex h-9 shrink-0 items-center gap-1.5 rounded-xl bg-white px-3 font-sans text-[13px] font-medium text-black transition-[transform,background-color] hover:bg-white/90 active:scale-[0.97]"
+        className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-white/[0.08] px-3 font-sans text-[13px] font-medium text-fg ring-1 ring-white/10 ring-inset transition-colors hover:bg-white/[0.14]"
       >
         {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
         {copied ? 'Copied' : 'Copy'}

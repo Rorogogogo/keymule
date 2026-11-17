@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { motion, useReducedMotion, useScroll, useTransform } from 'motion/react'
-import { ArrowRight, Play } from 'lucide-react'
+import { motion, useReducedMotion, useScroll, useTransform, type MotionValue } from 'motion/react'
+import { ArrowRight, KeyRound, Lock } from 'lucide-react'
 import { CopyCommand, GITHUB, GithubIcon, Logo } from './ui'
+
+const EASE = [0.22, 1, 0.36, 1] as const
 
 export function Nav() {
   const [scrolled, setScrolled] = useState(false)
@@ -18,32 +20,30 @@ export function Nav() {
     ['FAQ', '#faq'],
   ]
   return (
-    <header
-      className={`fixed inset-x-0 top-0 z-40 transition-[background-color,border-color] duration-300 ${
-        scrolled ? 'border-b border-line bg-bg/70 backdrop-blur-xl' : 'border-b border-transparent'
-      }`}
-    >
-      <nav className="mx-auto flex h-16 max-w-6xl items-center gap-8 px-5 sm:px-8" aria-label="Main">
-        <a href="#top" className="flex items-center gap-2.5 font-semibold tracking-tight">
-          <Logo className="size-6" />
-          <span>keymule</span>
+    <header className="fixed inset-x-0 top-0 z-40 flex justify-center px-4 pt-3">
+      <nav
+        aria-label="Main"
+        className={`flex h-12 w-full max-w-5xl items-center gap-6 rounded-full pr-1.5 pl-4 transition-[background-color,box-shadow,border-color] duration-300 ${
+          scrolled ? 'border border-line bg-bg-2/75 shadow-[0_8px_30px_rgb(0_0_0/0.5)] backdrop-blur-xl' : 'border border-transparent'
+        }`}
+      >
+        <a href="#top" className="flex items-center gap-2 text-[15px] font-semibold tracking-tight">
+          <Logo className="size-[22px]" />
+          keymule
         </a>
-        <div className="hidden items-center gap-7 text-sm text-fg-2 md:flex">
+        <div className="hidden items-center gap-6 text-[13.5px] text-fg-2 md:flex">
           {links.map(([label, href]) => (
             <a key={href} href={href} className="transition-colors hover:text-fg">
               {label}
             </a>
           ))}
         </div>
-        <div className="ml-auto flex items-center gap-2">
-          <a href={GITHUB} className="hidden h-9 items-center gap-2 rounded-full px-3.5 text-sm text-fg-2 transition-colors hover:text-fg sm:flex">
+        <div className="ml-auto flex items-center gap-1">
+          <a href={GITHUB} className="hidden h-9 items-center gap-2 rounded-full px-3 text-[13.5px] text-fg-2 transition-colors hover:text-fg sm:flex">
             <GithubIcon /> GitHub
           </a>
-          <a
-            href="#install"
-            className="flex h-9 items-center rounded-full bg-white px-4 text-sm font-medium text-black transition-transform hover:scale-[1.03] active:scale-[0.98]"
-          >
-            Install
+          <a href="#install" className="flex h-9 items-center rounded-full bg-fg px-4 text-[13.5px] font-medium text-bg transition-opacity hover:opacity-90">
+            Get keymule
           </a>
         </div>
       </nav>
@@ -51,80 +51,166 @@ export function Nav() {
   )
 }
 
+/** The agent's side: a terminal where the request goes out by name. */
+function TerminalCard() {
+  return (
+    <div className="window w-[340px] overflow-hidden rounded-xl text-left">
+      <div className="flex items-center gap-1.5 border-b border-line px-3.5 py-2.5">
+        <span className="size-2 rounded-full bg-white/15" />
+        <span className="size-2 rounded-full bg-white/15" />
+        <span className="size-2 rounded-full bg-white/15" />
+        <span className="ml-2 font-mono text-[11px] text-fg-3">claude · ~/code/acme</span>
+      </div>
+      <div className="space-y-2.5 p-4 font-mono text-[11.5px] leading-relaxed">
+        <p className="text-fg">
+          <span className="text-fg-3">›</span> why did my last CI run fail?
+        </p>
+        <p className="text-fg-2">
+          <span className="text-accent">⏺ keymule</span>.http_request(
+          <br />
+          <span className="pl-4">credential=</span>
+          <span className="text-ok">"github-acme"</span>,
+          <br />
+          <span className="pl-4">path="/repos/acme/app/actions/runs")</span>
+        </p>
+        <p className="text-fg-3">
+          ⎿ 200 · Authorization: Bearer <span className="rounded bg-white/10 px-1 text-fg-2">[redacted]</span>
+        </p>
+        <p className="text-fg">
+          Run #482 failed in integration tests<span className="blink">▍</span>
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/** keymule's side: the window where you type the token, not the chat. */
+function DialogCard() {
+  return (
+    <div className="window beam w-[300px] rounded-xl p-4 text-left">
+      <div className="flex items-center gap-2 text-[11px] text-fg-3">
+        <Logo className="size-3.5" /> keymule
+      </div>
+      <div className="mt-3 flex gap-3">
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent/15 text-accent ring-1 ring-accent/25 ring-inset">
+          <KeyRound className="size-4" />
+        </span>
+        <div className="min-w-0">
+          <p className="text-[13px] font-semibold tracking-tight">Save a token for github-acme</p>
+          <p className="mt-1 flex items-center gap-1 text-[11.5px] text-fg-2">
+            <Lock className="size-3" /> Locked to api.github.com
+          </p>
+        </div>
+      </div>
+      <div className="mt-3.5 flex h-8 items-center rounded-lg border border-line-2 bg-black/30 px-3 font-mono text-[13px] tracking-[0.2em] text-fg-2">
+        ●●●●●●●●●●●●●●<span className="blink ml-0.5 tracking-normal text-accent">|</span>
+      </div>
+      <div className="mt-3.5 flex justify-end gap-2 text-[12px]">
+        <span className="rounded-md px-2.5 py-1 text-fg-2">Cancel</span>
+        <span className="rounded-md bg-accent px-3 py-1 font-medium text-white">Save</span>
+      </div>
+    </div>
+  )
+}
+
+function Floating({ y, children, className }: { y: MotionValue<number>; children: React.ReactNode; className: string }) {
+  return (
+    <motion.div style={{ y }} className={`absolute hidden lg:block ${className}`}>
+      {children}
+    </motion.div>
+  )
+}
+
 export function Hero() {
   const reduce = useReducedMotion()
-  const shot = useRef<HTMLDivElement>(null)
-  // The app screenshot starts tilted back and stands up as you scroll.
-  const { scrollYProgress } = useScroll({ target: shot, offset: ['start end', 'start 30%'] })
-  const rotateX = useTransform(scrollYProgress, [0, 1], [reduce ? 0 : 22, 0])
-  const scale = useTransform(scrollYProgress, [0, 1], [reduce ? 1 : 0.92, 1])
+  const scene = useRef<HTMLDivElement>(null)
+  const { scrollYProgress } = useScroll({ target: scene, offset: ['start end', 'end start'] })
+  const near = useTransform(scrollYProgress, [0, 1], [reduce ? 0 : 90, reduce ? 0 : -90])
+  const far = useTransform(scrollYProgress, [0, 1], [reduce ? 0 : 40, reduce ? 0 : -40])
   const rise = (d: number) =>
     reduce
       ? {}
-      : {
-          initial: { opacity: 0, y: 24, filter: 'blur(8px)' },
-          animate: { opacity: 1, y: 0, filter: 'blur(0px)' },
-          transition: { duration: 0.9, delay: d, ease: [0.22, 1, 0.36, 1] as const },
-        }
+      : { initial: { opacity: 0, y: 16, filter: 'blur(6px)' }, animate: { opacity: 1, y: 0, filter: 'blur(0px)' }, transition: { duration: 0.9, delay: d, ease: EASE } }
 
   return (
     <section id="top" className="relative overflow-hidden pt-36 sm:pt-44">
-      <div className="grid-bg pointer-events-none absolute inset-0" aria-hidden="true" />
+      {/* Light from above, and the horizon line the product sits on. */}
       <div
-        className="pointer-events-none absolute top-[-280px] left-1/2 h-[720px] w-[1100px] -translate-x-1/2 rounded-full opacity-70 blur-3xl"
-        style={{ background: 'radial-gradient(closest-side, rgb(139 123 255 / 0.45), rgb(91 140 255 / 0.15) 55%, transparent)' }}
+        className="pointer-events-none absolute inset-x-0 top-0 h-[900px]"
+        style={{ background: 'radial-gradient(60% 50% at 50% 0%, rgb(139 123 255 / 0.18), transparent 70%)' }}
         aria-hidden="true"
       />
-      <div className="relative mx-auto max-w-6xl px-5 text-center sm:px-8">
+      <div className="relative mx-auto max-w-5xl px-5 text-center sm:px-8">
         <motion.a
           {...rise(0)}
           href={`${GITHUB}/releases/latest`}
-          className="glass group inline-flex items-center gap-2 rounded-full py-1 pr-3 pl-1 text-[13px] text-fg-2 backdrop-blur-xl transition-colors hover:text-fg"
+          className="group inline-flex items-center gap-2 rounded-full border border-line bg-white/[0.03] py-1 pr-3 pl-3 text-[13px] text-fg-2 transition-colors hover:border-line-2 hover:text-fg"
         >
-          <span className="rounded-full bg-accent/20 px-2 py-0.5 text-[12px] font-medium text-accent">New</span>
-          Reveal now works in dev containers
+          <span className="size-1.5 rounded-full bg-accent shadow-[0_0_10px_var(--color-accent)]" />
+          v0.18 · Reveal now works in dev containers
           <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
         </motion.a>
-        <motion.h1 {...rise(0.08)} className="headline mt-8 text-[clamp(42px,6.4vw,88px)]">
-          Your agents use the keys.
+        <motion.h1 {...rise(0.08)} className="mt-8 text-[clamp(40px,6vw,76px)] leading-[1.04] font-semibold">
+          <span className="headline">Your agents use the keys.</span>
           <br />
-          They never see them.
+          <span className="headline dim">They never see them.</span>
         </motion.h1>
-        <motion.p {...rise(0.16)} className="mx-auto mt-6 max-w-2xl text-lg leading-relaxed text-fg-2 sm:text-xl">
-          keymule lets Claude Code, Codex and Cursor use your API tokens, passwords and SSH logins by name. It adds the secret itself
-          and strips it from every reply, so it never reaches the model, the chat or a transcript.
+        <motion.p {...rise(0.16)} className="mx-auto mt-6 max-w-[34rem] text-[17px] leading-relaxed text-fg-2 sm:text-lg">
+          A local vault for Claude Code, Codex and Cursor. Agents use your tokens, passwords and SSH logins by name. keymule adds the
+          secret and strips it from every reply.
         </motion.p>
-        <motion.div {...rise(0.24)} className="mx-auto mt-10 max-w-xl">
+        <motion.div {...rise(0.24)} className="mt-9 flex flex-wrap items-center justify-center gap-3">
+          <a href="#install" className="flex h-11 items-center rounded-full bg-fg px-6 text-[15px] font-medium text-bg transition-opacity hover:opacity-90">
+            Get keymule
+          </a>
+          <a
+            href={GITHUB}
+            className="flex h-11 items-center gap-2 rounded-full border border-line-2 bg-white/[0.03] px-5 text-[15px] font-medium text-fg transition-colors hover:bg-white/[0.07]"
+          >
+            <GithubIcon /> View on GitHub
+          </a>
+        </motion.div>
+        <motion.div {...rise(0.32)} className="mx-auto mt-6 max-w-lg">
           <CopyCommand />
-          <div className="mt-5 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-sm text-fg-2">
-            <a href="#film" className="group inline-flex items-center gap-2 transition-colors hover:text-fg">
-              <span className="flex size-6 items-center justify-center rounded-full bg-white/10 ring-1 ring-white/15 ring-inset">
-                <Play className="size-3 fill-current" />
-              </span>
-              Watch the 30-second film
-            </a>
-            <span className="text-fg-3">macOS · Linux · dev containers · free and open source</span>
-          </div>
         </motion.div>
       </div>
 
-      <div className="relative mx-auto mt-20 max-w-6xl px-5 pb-24 sm:px-8 [perspective:1600px]">
-        <motion.div ref={shot} style={{ rotateX, scale, transformOrigin: '50% 0%' }} className="relative">
+      <div ref={scene} className="relative mx-auto mt-24 max-w-6xl px-5 pb-28 sm:px-8">
+        {/* horizon */}
+        <div className="pointer-events-none absolute -top-24 left-1/2 h-[600px] w-[1400px] -translate-x-1/2" aria-hidden="true">
           <div
-            className="pointer-events-none absolute -inset-x-10 -bottom-10 top-1/3 rounded-full opacity-60 blur-3xl"
-            style={{ background: 'radial-gradient(closest-side, rgb(139 123 255 / 0.35), transparent)' }}
-            aria-hidden="true"
+            className="absolute inset-0 rounded-[100%] border-t border-white/20"
+            style={{ boxShadow: '0 -20px 80px -20px rgb(139 123 255 / 0.55) inset', maskImage: 'linear-gradient(90deg, transparent, black 25%, black 75%, transparent)' }}
           />
-          <div className="glass relative overflow-hidden rounded-[22px] p-1.5 sm:p-2">
+        </div>
+        <motion.div
+          initial={reduce ? false : { opacity: 0, y: 40 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 1.1, delay: 0.4, ease: EASE }}
+          className="relative"
+        >
+          <motion.div style={{ y: far }} className="window relative overflow-hidden rounded-2xl">
+            <div className="flex items-center gap-1.5 border-b border-line bg-bg-3/60 px-4 py-3">
+              <span className="size-2.5 rounded-full bg-white/12" />
+              <span className="size-2.5 rounded-full bg-white/12" />
+              <span className="size-2.5 rounded-full bg-white/12" />
+              <span className="mx-auto font-mono text-[11px] text-fg-3">keymule</span>
+            </div>
             <img
               src="/app-dark.png"
               alt="The keymule page: credentials with their hosts, one opened to show its note, and live activity"
-              className="block w-full rounded-[16px] border border-line"
+              className="block w-full"
               width={2640}
               height={1640}
             />
-          </div>
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-bg to-transparent" aria-hidden="true" />
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-bg via-bg/60 to-transparent" />
+          </motion.div>
+          <Floating y={near} className="-left-10 bottom-16">
+            <TerminalCard />
+          </Floating>
+          <Floating y={near} className="-right-8 top-24">
+            <DialogCard />
+          </Floating>
         </motion.div>
       </div>
     </section>
