@@ -472,7 +472,8 @@ function paged(rows, key, base) {
   if (bar.length) out.push(h('div', { class: 'morebar' }, bar))
   return out
 }
-const overviewOnly = n => (state.view === 'overview' ? n : Infinity)
+// The overview shows a few; a list's own page starts with 20.
+const firstRows = n => (state.view === 'overview' ? n : STEP)
 
 function descLine(name, text) {
   if (state.describing === name) {
@@ -538,7 +539,7 @@ function renderCreds(creds) {
         h('span', { class: open ? 'sub wrap' : 'sub', title: open ? null : credSub(c).map(x => x.textContent ?? x).join(' · ') }, join(credSub(c))),
         open ? details(c.name, c.description) : null),
       h('span', { class: 'acc' }, status, revealButton(c.name), moreMenu(c.name, commonItems(c.name, c.description))))
-  }), 'creds', overviewOnly(5))
+  }), 'creds', firstRows(5))
 }
 
 function renderServers(servers) {
@@ -563,7 +564,7 @@ function renderServers(servers) {
           ...commonItems(s.name, s.description),
         ])))
     return state.converting === s.name ? h('div', { class: 'rowgroup' }, row, convertForm(s)) : row
-  }), 'servers', overviewOnly(5))
+  }), 'servers', firstRows(5))
 }
 
 // Move an unused MCP server secret to Credentials as an SSH login or a
