@@ -5,8 +5,9 @@
 const $ = id => document.getElementById(id)
 
 // The token is in the URL fragment keymule opened. Keep it for this tab only
-// and take it out of the address bar.
-const token = (() => {
+// and take it out of the address bar. Without one, a paired browser logs in
+// with its pairing key (see login below).
+let token = (() => {
   const m = location.hash.match(/t=([0-9a-f]{32})/)
   if (m) {
     try { sessionStorage.setItem('keymule-token', m[1]) } catch {}
@@ -88,14 +89,51 @@ const badge = (text, kind) => h('span', { class: `badge ${kind || ''}` }, text)
 const join = parts => parts.filter(Boolean).flatMap((p, i) => (i ? [' · ', p] : [p]))
 const mono = text => h('span', { class: 'mono' }, text)
 
-async function api(path, body) {
+async function api(path, body, retried) {
+  if (!token) await tryLogin()
+  const used = token
   const r = await fetch(path, {
     method: body === undefined ? 'GET' : 'POST',
-    headers: { 'X-Keymule-Token': token || '', 'Content-Type': 'application/json' },
+    headers: { 'X-Keymule-Token': used || '', 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  if (r.status === 403) throw new Error('forbidden')
+  if (r.status === 403) {
+    // `keymule ui` restarted with a new token: log in again, once.
+    if (!retried && (token !== used || await tryLogin()) && token !== used) return api(path, body, true)
+    throw new Error('forbidden')
+  }
   return r.json()
+}
+
+// A browser paired for keymule's questions opens the page without the link:
+// it signs a one-off challenge with its pairing key (which can't be read out
+// of the browser) and gets the token back. Nothing to log in with until the
+// browser is paired.
+async function login() {
+  const d = await idb('readonly', s => s.get('me')).catch(() => null)
+  if (!d) return false
+  const post = (path, body) => fetch(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(r => r.json())
+  const c = await post('/login/challenge', {})
+  if (!c.ok) return false
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, d.keyPair.privateKey, enc(`keymule-login-v1\n${c.nonce}`))
+  const r = await post('/login', { device: d.id, nonce: c.nonce, sig: b64(sig) })
+  if (!r.ok) return false
+  token = r.token
+  try { sessionStorage.setItem('keymule-token', token) } catch {}
+  return true
+}
+
+// One login at a time: a good one is reused for 2 s, and after a failed one
+// keymule waits 10 s before trying again.
+let loginTry = null
+function tryLogin() {
+  if (!loginTry) {
+    loginTry = login().catch(() => false)
+    loginTry.then(ok => setTimeout(() => { loginTry = null }, ok ? 2000 : 10000))
+  }
+  return loginTry
 }
 
 const TOAST_ICON = { ok: 'check', bad: 'x', run: 'spin' }
@@ -682,6 +720,7 @@ const EVENTS = {
   START: 'Started', EXEC: 'Ran', INSTALL: 'Copied to git', UNINSTALL: 'Removed from git',
   'GH-SECRET': 'Copied to GitHub', 'AUTO-ALLOW': 'Allowed', 'ALLOW-ALL-ON': 'Allow all on',
   'ALLOW-ALL-OFF': 'Allow all off', PAIR: 'Paired', 'BAD-APPROVAL': 'Refused',
+  'PAGE-LOGIN': 'Signed in', 'ANSWERED-IN-PAGE': 'Answered', 'DENIED-IN-PAGE': 'Denied',
   SSH: 'Logged in', CONVERT: 'Moved', RENAME: 'Renamed',
 }
 // keymule's own events have no credential: show them as keymule's.
@@ -801,7 +840,7 @@ setInterval(loadPlan, 60000)
 // public half; every answer is signed with the private one, so nothing else
 // can answer for you. A typed secret is encrypted to the asking process.
 
-const ap = { pending: [], devices: [], pageMode: false, me: null, live: false, busy: false, err: '', value: '', revealKeys: {} }
+const ap = { pending: [], devices: [], pageMode: false, me: null, live: false, busy: false, err: '', value: '', code: '', revealKeys: {}, version: '', hidden: new Set() }
 
 const enc = s => new TextEncoder().encode(s)
 const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)))
@@ -845,10 +884,16 @@ function browserName() {
 
 const paired = () => !!ap.me && ap.devices.some(d => d.id === ap.me.id)
 
-async function loadApprovals() {
+// With `wait`, the server holds the request until something changes (up to
+// 25 s). Chrome slows timers in background tabs to once a minute, but not
+// an answer to a request, so a question still shows (and notifies) at once.
+async function loadApprovals(wait) {
   try {
-    const r = await api('/api/approvals')
+    const r = await api(`/api/approvals${wait ? `?wait=${ap.version}` : ''}`)
+    ap.version = r.version || ''
     ap.pending = (r.pending || []).map(raw => ({ raw, req: JSON.parse(raw) }))
+    const ids = new Set(ap.pending.map(p => p.req.id))
+    for (const id of ap.hidden) if (!ids.has(id)) ap.hidden.delete(id)
     ap.devices = r.devices || []
     ap.pageMode = !!r.page_mode
     ap.live = true
@@ -863,6 +908,13 @@ async function loadApprovals() {
     ap.live = false
   }
   renderApprovals()
+  return ap.live
+}
+
+async function watchApprovals() {
+  for (;;) {
+    if (!await loadApprovals(true)) await new Promise(r => setTimeout(r, 2000))
+  }
 }
 
 async function pairThis(code) {
@@ -871,7 +923,7 @@ async function pairThis(code) {
     const d = await myDevice()
     const r = await api('/api/pair', { name: browserName(), key: d.pub, code })
     if (!r.ok) ap.err = r.stderr || 'Pairing failed'
-    else toast('This browser now answers keymule’s questions', 'ok')
+    else { ap.code = ''; toast('Paired. This browser answers keymule’s questions and opens the page without the link', 'ok') }
   } catch (e) {
     ap.err = e.message
   }
@@ -974,6 +1026,28 @@ async function answer(item, button) {
   renderApprovals()
 }
 
+// Saying no needs no signature, so a browser that isn't paired can do it
+// too and is never stuck behind a question.
+async function deny(item) {
+  ap.busy = true; ap.err = ''; renderApprovals()
+  try {
+    const r = await api('/api/approvals/deny', { id: item.req.id })
+    if (!r.ok) ap.err = r.stderr || 'That didn’t go through'
+    else { ap.value = ''; ap.pending = ap.pending.filter(p => p.req.id !== item.req.id) }
+  } catch (e) {
+    ap.err = e.message
+  }
+  ap.busy = false
+  renderApprovals()
+}
+
+// Close the question in this browser only; it keeps waiting.
+function hideAsk(item) {
+  ap.hidden.add(item.req.id)
+  ap.err = ''
+  renderApprovals()
+}
+
 // The question, laid out like keymule's popup: headline, text, code boxes.
 function askBody(body) {
   const paras = (body || '').split(/\n\n+/).filter(p => p.trim())
@@ -1007,77 +1081,175 @@ const ASK_ICON = { key: 'key', unlock: 'shield', trash: 'x', eye: 'eye', shield:
 let askKey = ''
 function renderAsk() {
   const wrap = $('ask')
-  const item = ap.pending[0]
+  const shown = ap.pending.filter(p => !ap.hidden.has(p.req.id))
+  const item = shown[0]
+  const me = paired()
   // Redraw only when something changed: a redraw mid-click would lose it.
-  const key = item && ap.live ? [item.req.id, ap.pending.length, ap.err, ap.busy, paired()].join('|') : ''
+  const key = item && ap.live ? [item.req.id, shown.length, ap.err, ap.busy, me, notifyAsk()].join('|') : ''
   if (key === askKey) return
   askKey = key
   if (!key) { wrap.hidden = true; wrap.replaceChildren(); return }
   const s = item.req.spec
-  const focusHad = document.activeElement && document.activeElement.id === 'askval'
+  const focusHad = document.activeElement && ['askval', 'askcode'].includes(document.activeElement.id)
+  const noLabel = s.cancel === 'Cancel' ? 'Deny' : s.cancel
   const card = h('div', { class: `ask ${s.tone || ''}`, role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'asktitle' },
-    h('div', { class: 'askbrand' }, 'keymule asks', ap.pending.length > 1 ? h('span', { class: 'askmore' }, `+${ap.pending.length - 1} more`) : null),
+    h('div', { class: 'askbrand' }, 'keymule asks',
+      shown.length > 1 ? h('span', { class: 'askmore' }, `+${shown.length - 1} more`) : null),
     h('div', { class: 'askmain' },
       h('div', { class: 'askicon' }, icon(ASK_ICON[s.icon] || 'key')),
       h('div', { class: 'asktext' },
         h('h2', { id: 'asktitle' }, s.title),
         askBody(s.body),
-        s.secure && paired() ? secretField(item, s) : null,
+        s.secure && me ? secretField(item, s) : null,
+        me ? null : pairInCard(),
         ap.err ? h('p', { class: 'askerr' }, ap.err) : null)),
-    paired()
+    notifyAsk() ? h('div', { class: 'asknotify' }, notifyButton('Get a notification next time')) : null,
+    me
       ? h('div', { class: 'askfoot' }, s.buttons.map((b, i) => [
           h('button', {
             class: `btn${b === s.destructive ? ' danger-fill' : b === s.primary ? ' primary' : ''}`,
-            type: 'button', disabled: ap.busy, 'data-default': b === s.default ? '1' : null,
+            type: 'button', disabled: ap.busy, 'data-safe': b === s.cancel ? '1' : null,
             onclick: () => answer(item, b),
           }, b),
           i === 0 && s.buttons.length > 2 ? h('span', { class: 'grow' }) : null,
         ]))
-      : h('div', { class: 'askfoot' }, h('span', { class: 'note' }, 'Pair this browser (above) to answer.')))
+      : h('div', { class: 'askfoot' },
+          h('button', { class: 'btn', type: 'button', disabled: ap.busy, onclick: () => hideAsk(item) }, 'Hide'),
+          h('span', { class: 'grow' }),
+          h('button', { class: 'btn', type: 'button', disabled: ap.busy, 'data-safe': '1', onclick: () => deny(item) }, noLabel)))
   wrap.replaceChildren(card)
   wrap.hidden = false
-  const val = $('askval')
-  if (val && (focusHad || !wrap.dataset.shown || wrap.dataset.shown !== item.req.id)) val.focus()
-  else if (!val && wrap.dataset.shown !== item.req.id) wrap.querySelector('[data-default]')?.focus()
+  const val = $('askval') || $('askcode')
+  if (val && (focusHad || wrap.dataset.shown !== item.req.id)) val.focus()
+  // Focus the safe button, never the one that says yes: a question can wait
+  // in a tab for minutes, and a stray Space or Return would press it.
+  else if (!val && wrap.dataset.shown !== item.req.id) wrap.querySelector('[data-safe]')?.focus()
   wrap.dataset.shown = item.req.id
+}
+
+// Shown in the question when this browser can't answer yet: pair right here.
+function pairInCard() {
+  const go = () => pairThis(ap.code)
+  const input = h('input', {
+    id: 'askcode', class: 'field paircode', inputmode: 'numeric', placeholder: '123-456', 'aria-label': 'Pairing code',
+    oninput: e => { ap.code = e.target.value },
+    onkeydown: e => { if (e.key === 'Enter') { e.preventDefault(); go() } },
+  })
+  input.value = ap.code
+  return h('div', { class: 'askpair' },
+    h('p', null, 'This browser isn’t paired, so it can only say no. To answer, enter the code `keymule ui` printed in your terminal.'),
+    ap.devices.length ? h('p', { class: 'muted' }, 'Paired before? Use the same address: 127.0.0.1 and localhost count as different.') : null,
+    h('div', { class: 'pairgo' }, input,
+      h('button', { class: 'btn primary', type: 'button', disabled: ap.busy, onclick: go }, ap.busy ? 'Pairing…' : 'Pair')))
+}
+
+// ---- notifications and the tab title -------------------------------------------
+//
+// keymule's questions wait in this page and time out after 3 minutes, so tell
+// the user even when they're looking at a terminal: a system notification
+// (the browser's) and a count in the tab title.
+
+const canNotify = () => 'Notification' in window && window.isSecureContext
+const usesPage = () => ap.pageMode || ap.devices.length > 0
+let notifyLater = false
+try { notifyLater = localStorage.getItem('keymule-notify-later') === '1' } catch {}
+const notifyAsk = () => canNotify() && usesPage() && Notification.permission === 'default'
+
+function notifyButton(label) {
+  return h('button', {
+    class: 'btn link', type: 'button',
+    onclick: async () => {
+      try { await Notification.requestPermission() } catch {}
+      if (Notification.permission === 'granted') toast('You’ll get a notification when keymule asks', 'ok')
+      askKey = ''; pairKey = ''; renderApprovals()
+    },
+  }, label)
+}
+
+const notes = new Map()
+function notifyNew() {
+  const ids = new Set(ap.pending.map(p => p.req.id))
+  for (const [id, n] of notes) if (!ids.has(id)) { n?.close(); notes.delete(id) }
+  if (!canNotify() || Notification.permission !== 'granted') return
+  for (const p of ap.pending) {
+    if (notes.has(p.req.id)) continue
+    if (document.visibilityState === 'visible' && document.hasFocus()) { notes.set(p.req.id, null); continue }
+    try {
+      const n = new Notification('keymule asks', { body: p.req.spec.title, tag: `keymule-${p.req.id}`, requireInteraction: true })
+      n.onclick = () => { window.focus(); ap.hidden.delete(p.req.id); renderApprovals(); n.close() }
+      notes.set(p.req.id, n)
+    } catch { notes.set(p.req.id, null) }
+  }
+}
+
+const baseTitle = document.title
+function renderTitle() {
+  const n = ap.pending.length
+  document.title = n ? `(${n}) keymule asks` : baseTitle
 }
 
 let pairKey = ''
 function renderPairing() {
   const el = $('pairing')
-  const show = ap.live && (ap.pageMode || ap.devices.length) && !paired()
+  const show = ap.live && usesPage() && !paired()
   const first = ap.devices.length === 0
-  const key = show ? [first, ap.busy, ap.pending.length ? '' : ap.err].join('|') : ''
+  const waiting = ap.pending.filter(p => ap.hidden.has(p.req.id)).length
+  const nudge = ap.live && notifyAsk() && !notifyLater
+  const key = [show, first, ap.busy, ap.pending.length ? '' : ap.err, waiting, nudge].join('|')
   if (key === pairKey) return
   pairKey = key
-  if (!show) { el.replaceChildren(); return }
-  const input = first ? h('input', { id: 'paircode', class: 'field paircode', inputmode: 'numeric', placeholder: '123-456', 'aria-label': 'Pairing code' }) : null
-  const go = () => pairThis(first ? ($('paircode')?.value || '') : '')
-  el.replaceChildren(h('div', { class: 'pairing' },
-    h('div', { class: 'pairtext' },
-      h('strong', null, 'Answer keymule’s questions here'),
-      h('span', null, first
-        ? 'There’s no screen for keymule’s popups on this machine. Pair this browser with the code `keymule ui` printed in its terminal.'
-        : 'Another browser is already paired. Pairing this one asks there first.')),
-    h('div', { class: 'pairgo' },
-      input,
-      h('button', { class: 'btn primary', type: 'button', disabled: ap.busy, onclick: go }, ap.busy ? 'Pairing…' : 'Pair this browser')),
-    ap.err && !ap.pending.length ? h('p', { class: 'askerr' }, ap.err) : null))
-  if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') go() })
+  const parts = []
+  if (waiting) {
+    parts.push(h('div', { class: 'pairing slim' },
+      h('div', { class: 'pairtext' }, h('strong', null, waiting === 1 ? 'A question is waiting for you' : `${waiting} questions are waiting for you`)),
+      h('div', { class: 'pairgo' }, h('button', { class: 'btn primary', type: 'button', onclick: () => { ap.hidden.clear(); renderApprovals() } }, 'Show'))))
+  }
+  if (show) {
+    const input = h('input', { id: 'paircode', class: 'field paircode', inputmode: 'numeric', placeholder: '123-456', 'aria-label': 'Pairing code' })
+    const go = () => pairThis($('paircode')?.value || '')
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') go() })
+    parts.push(h('div', { class: 'pairing' },
+      h('div', { class: 'pairtext' },
+        h('strong', null, 'Answer keymule’s questions here'),
+        h('span', null, first
+          ? 'There’s no screen for keymule’s popups on this machine. Pair this browser with the code `keymule ui` printed in its terminal.'
+          : 'Another browser is paired. Enter the code `keymule ui` printed in your terminal, or leave it empty to ask that browser.')),
+      h('div', { class: 'pairgo' },
+        input,
+        h('button', { class: 'btn primary', type: 'button', disabled: ap.busy, onclick: go }, ap.busy ? 'Pairing…' : 'Pair this browser')),
+      ap.err && !ap.pending.length ? h('p', { class: 'askerr' }, ap.err) : null))
+  }
+  if (nudge && !show) {
+    parts.push(h('div', { class: 'pairing slim' },
+      h('div', { class: 'pairtext' },
+        h('strong', null, 'Get a notification when keymule asks'),
+        h('span', null, 'Questions wait here and time out after 3 minutes.')),
+      h('div', { class: 'pairgo' },
+        h('button', { class: 'btn', type: 'button', onclick: () => {
+          notifyLater = true
+          try { localStorage.setItem('keymule-notify-later', '1') } catch {}
+          renderApprovals()
+        } }, 'Not now'),
+        notifyButton('Turn on'))))
+  }
+  el.replaceChildren(...parts)
 }
 
 function renderApprovals() {
   renderPairing()
   renderAsk()
+  renderTitle()
+  notifyNew()
 }
 
 document.addEventListener('keydown', e => {
-  const item = ap.pending[0]
-  if (e.key === 'Escape' && item && paired() && !$('ask').hidden && !ap.busy) {
-    e.preventDefault()
-    answer(item, item.req.spec.cancel)
-  }
+  if (e.key !== 'Escape' || $('ask').hidden || ap.busy || !$('reveal').hidden) return
+  const item = ap.pending.find(p => !ap.hidden.has(p.req.id))
+  if (!item) return
+  e.preventDefault()
+  if (paired()) answer(item, item.req.spec.cancel)
+  else hideAsk(item)
 })
 
-loadApprovals()
-setInterval(loadApprovals, 1000)
+watchApprovals()
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') loadApprovals() })

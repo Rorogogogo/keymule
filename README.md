@@ -386,10 +386,18 @@ and click **Pair this browser** with the code. From then on, when an agent needs
 secret, the question appears on the page: Allow, Cancel, Today / Always for allow-all, or a field
 to type the secret into.
 
+- **You hear about it.** The tab title shows "(1) keymule asks", and the page offers a browser
+  notification, so a question doesn't time out while you're watching the terminal.
+- **Paired once, the address is enough.** A paired browser opens `http://127.0.0.1:7420` without
+  the link's token: it signs in with its pairing key, and reconnects by itself when `keymule ui`
+  restarts. (No cookie: a browser would send it to every local port.)
+- **Never stuck.** A browser that isn't paired can still say no, hide the question, or pair right
+  in the question with the code. 127.0.0.1 and localhost count as different browsers.
 - **Only your browser can answer.** Pairing makes a key pair inside the browser (its private half
   can't be read out); every answer is signed with it, and keymule checks the signature. Something
   that can call the page's server or write keymule's files, an agent included, can't answer for
-  you. A second browser can only pair after an already paired one allows it.
+  you. A second browser pairs only after an already paired one allows it, or with the code from
+  `keymule ui` run in your own terminal (so losing your only paired browser doesn't lock you out).
 - **Typed secrets are encrypted** to the keymule process that asked, so they never sit in a file
   in the clear.
 - **Reveal works here too.** After you click Show, keymule encrypts the value to a one-off key
