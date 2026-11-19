@@ -194,6 +194,7 @@ pub fn replaced() -> bool {
 static IN_MENUBAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// This process is the menu bar app (so restarting means restarting it).
+#[cfg(target_os = "macos")]
 pub fn set_in_menubar() {
     IN_MENUBAR.store(true, std::sync::atomic::Ordering::Relaxed);
 }
