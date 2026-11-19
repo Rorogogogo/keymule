@@ -339,6 +339,7 @@ fn ask_signed(spec: &Spec) -> Result<Option<(String, Option<p256::SecretKey>, Re
     let d = dir()?;
     let req_path = d.join(format!("{id}.req.json"));
     let ans_path = d.join(format!("{id}.ans.json"));
+    let deny_path = d.join(format!("{id}.deny"));
     write_atomic(&req_path, &request)?;
     eprintln!(
         "keymule: waiting for you to answer in the keymule page (up to {} min)…",
@@ -349,13 +350,33 @@ fn ask_signed(spec: &Spec) -> Result<Option<(String, Option<p256::SecretKey>, Re
         if Instant::now() >= deadline {
             break None;
         }
+        if deny_path.exists() {
+            crate::http::audit("-", "DENIED-IN-PAGE", &id, 0);
+            break Some(Reply {
+                button: spec.cancel.to_string(),
+                device: String::new(),
+                sig: String::new(),
+                secret: None,
+            });
+        }
         if let Ok(text) = std::fs::read_to_string(&ans_path) {
             let _ = std::fs::remove_file(&ans_path);
+            // Read the paired browsers again: one may have been paired
+            // while this question waited (that's how you get unstuck).
+            let devs = devices(vault.as_ref());
             let checked = serde_json::from_str::<Reply>(&text)
                 .map_err(|e| anyhow!("{e}"))
                 .and_then(|r| verify(&devs, &id, &request, &r).map(|_| r));
             match checked {
-                Ok(r) if spec.buttons.contains(&r.button.as_str()) => break Some(r),
+                Ok(r) if spec.buttons.contains(&r.button.as_str()) => {
+                    crate::http::audit(
+                        "-",
+                        "ANSWERED-IN-PAGE",
+                        &format!("{id} {} by {}", r.button, r.device),
+                        0,
+                    );
+                    break Some(r);
+                }
                 Ok(_) => {}
                 Err(e) => crate::http::audit("-", "BAD-APPROVAL", &format!("{id}: {e}"), 0),
             }
@@ -363,6 +384,7 @@ fn ask_signed(spec: &Spec) -> Result<Option<(String, Option<p256::SecretKey>, Re
         std::thread::sleep(Duration::from_millis(250));
     };
     let _ = std::fs::remove_file(&req_path);
+    let _ = std::fs::remove_file(&deny_path);
     Ok(picked.map(|r| (id, sk, r)))
 }
 
@@ -414,6 +436,36 @@ pub fn answer(vault: &dyn Vault, id: &str, reply: &Reply) -> Result<()> {
         &d.join(format!("{id}.ans.json")),
         &serde_json::to_string(reply)?,
     )
+}
+
+/// Say no to a question. Needs no signature: no can't give anything away,
+/// and it means a browser that isn't paired is never stuck behind one.
+pub fn deny(id: &str) -> Result<()> {
+    if !is_id(id) {
+        bail!("bad id");
+    }
+    let d = dir()?;
+    if !d.join(format!("{id}.req.json")).exists() {
+        bail!("that question has already been answered or timed out");
+    }
+    write_atomic(&d.join(format!("{id}.deny")), "")
+}
+
+/// Changes whenever the waiting questions or shown values change, so the
+/// page can wait for news instead of asking every second.
+pub fn version() -> String {
+    let id = |t: &str| {
+        serde_json::from_str::<serde_json::Value>(t)
+            .ok()
+            .and_then(|v| v["id"].as_str().map(str::to_string))
+    };
+    let mut ids: Vec<String> = pending().iter().filter_map(|t| id(t)).collect();
+    ids.extend(
+        shows()
+            .iter()
+            .filter_map(|v| v["id"].as_str().map(str::to_string)),
+    );
+    ids.join(",")
 }
 
 #[cfg(test)]

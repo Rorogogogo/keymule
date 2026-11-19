@@ -453,6 +453,13 @@ pre.plan {
 .pairgo { display: flex; gap: 8px; }
 .paircode { width: 110px; font-family: var(--mono); text-align: center; letter-spacing: 0.06em; }
 .pairing .askerr { grid-column: 1 / -1; margin: 0; }
+.pairing.slim { padding: 12px 18px; margin-bottom: 16px; }
+.pairing.slim + .pairing { margin-top: -4px; }
+.askpair { display: grid; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.askpair p { margin: 0; font-size: 13px; }
+.askpair .muted { font-size: 12.5px; }
+.asknotify { padding: 0 20px 12px; display: flex; justify-content: flex-end; }
+.asknotify .btn.link { font-size: 12.5px; }
 @media (max-width: 640px) { .pairing { grid-template-columns: 1fr; } }
 
 .askwrap {

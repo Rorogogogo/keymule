@@ -32,7 +32,27 @@ struct Ctx {
     /// Pairs the first browser for page approvals; printed in the terminal
     /// that ran `keymule ui`.
     code: String,
+    /// `keymule ui` was started at a terminal, so the code can also pair a
+    /// browser when others are already paired. Without this, losing your
+    /// only paired browser (cleared site data, another address) would lock
+    /// you out for good.
+    code_repairs: bool,
 }
+
+/// Bumped when a browser is paired or unpaired, so a waiting page hears.
+static DEVICES_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn approvals_version() -> String {
+    format!(
+        "{}:{}",
+        DEVICES_GEN.load(std::sync::atomic::Ordering::Relaxed),
+        crate::approvals::version()
+    )
+}
+
+/// How long the page's request for news may wait. Chrome slows timers in
+/// background tabs to once a minute; a waiting request is answered at once.
+const WAIT_SECS: u64 = 25;
 
 /// The page's usual port. A fixed address matters: a browser keeps its
 /// pairing key per address, so a new port each run would lose it.
@@ -45,7 +65,12 @@ pub fn run(open: bool, port: u16) -> Result<()> {
         println!("Opened keymule's window (from the menu bar app).");
         return Ok(());
     }
-    let (listener, ctx) = bind(port)?;
+    let at_terminal = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .is_ok();
+    let (listener, ctx) = bind(port, at_terminal)?;
     let url = ctx.url();
     println!(
         "keymule ui is running at {url}\nOnly this machine can reach it. Press Ctrl-C to stop."
@@ -68,13 +93,13 @@ pub fn run(open: bool, port: u16) -> Result<()> {
 /// (with its token). Used by the macOS menu-bar app.
 #[cfg(target_os = "macos")]
 pub fn start() -> Result<String> {
-    let (listener, ctx) = bind(DEFAULT_PORT)?;
+    let (listener, ctx) = bind(DEFAULT_PORT, false)?;
     let url = ctx.url();
     std::thread::spawn(move || serve(listener, ctx));
     Ok(url)
 }
 
-fn bind(port: u16) -> Result<(TcpListener, Arc<Ctx>)> {
+fn bind(port: u16, code_repairs: bool) -> Result<(TcpListener, Arc<Ctx>)> {
     let listener = TcpListener::bind(("127.0.0.1", port))
         .or_else(|_| TcpListener::bind(("127.0.0.1", 0)))
         .context("can't listen on 127.0.0.1")?;
@@ -86,6 +111,7 @@ fn bind(port: u16) -> Result<(TcpListener, Arc<Ctx>)> {
         token: random_token()?,
         exe: std::env::current_exe()?,
         code: format!("{:03}-{:03}", n / 1000, n % 1000),
+        code_repairs,
     });
     Ok((listener, ctx))
 }
@@ -103,6 +129,21 @@ fn serve(listener: TcpListener, ctx: Arc<Ctx>) {
         std::thread::spawn(move || {
             let _ = handle(&ctx, stream);
         });
+    }
+}
+
+/// `GET /api/approvals?wait=<version>` holds until something changes (or
+/// [`WAIT_SECS`] pass). Without `wait` it answers straight away.
+fn wait_for_news(target: &str) {
+    let Some(seen) = target
+        .split_once('?')
+        .and_then(|(_, q)| q.split('&').find_map(|kv| kv.strip_prefix("wait=")))
+    else {
+        return;
+    };
+    let until = std::time::Instant::now() + Duration::from_secs(WAIT_SECS);
+    while std::time::Instant::now() < until && approvals_version() == seen {
+        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -188,6 +229,9 @@ fn handle(ctx: &Ctx, mut stream: TcpStream) -> Result<()> {
                     "application/json",
                     b"{\"error\":\"forbidden\"}",
                 );
+            }
+            if method == "GET" && p == "/api/approvals" {
+                wait_for_news(&target);
             }
             let out = api(ctx, &method, p, &body);
             respond(
@@ -413,6 +457,7 @@ fn api(ctx: &Ctx, method: &str, path: &str, body: &[u8]) -> Value {
                 .map(|d| json!({"id": d.id, "name": d.name, "added": d.added}))
                 .collect();
             json!({
+                "version": approvals_version(),
                 "page_mode": crate::dialog::page_mode(),
                 "pending": crate::approvals::pending(),
                 "shows": crate::approvals::shows(),
@@ -431,6 +476,10 @@ fn api(ctx: &Ctx, method: &str, path: &str, body: &[u8]) -> Value {
                 Err(e) => json!({"ok": false, "stderr": e.to_string()}),
             }
         }
+        ("POST", "/api/approvals/deny") => match crate::approvals::deny(field("id")) {
+            Ok(()) => json!({"ok": true}),
+            Err(e) => json!({"ok": false, "stderr": e.to_string()}),
+        },
         ("POST", "/api/pair") => pair(ctx, field("name"), field("key"), field("code")),
         ("POST", "/api/unpair") => {
             let id = field("id").to_string();
@@ -448,7 +497,10 @@ fn api(ctx: &Ctx, method: &str, path: &str, body: &[u8]) -> Value {
                 d.name
             )) {
                 Ok(true) => match crate::approvals::remove_device(vault.as_ref(), &id) {
-                    Ok(_) => json!({"ok": true}),
+                    Ok(_) => {
+                        DEVICES_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        json!({"ok": true})
+                    }
                     Err(e) => json!({"ok": false, "stderr": e.to_string()}),
                 },
                 Ok(false) => json!({"ok": false, "stderr": "not unpaired"}),
@@ -621,13 +673,21 @@ fn pair(ctx: &Ctx, name: &str, key: &str, code: &str) -> Value {
     if known.iter().any(|d| d.id == device.id) {
         return json!({"ok": true, "id": device.id});
     }
+    let code = code.replace([' ', '-'], "");
+    let code_ok = !code.is_empty() && same(code.as_bytes(), ctx.code.replace('-', "").as_bytes());
     let allowed = if known.is_empty() {
-        let code = code.replace([' ', '-'], "");
         if !code.is_empty() {
-            same(code.as_bytes(), ctx.code.replace('-', "").as_bytes())
+            code_ok
         } else {
             first_pair_on_screen(&device.name)
         }
+    } else if !code.is_empty() {
+        if !ctx.code_repairs {
+            return json!({"ok": false, "stderr": "another browser is paired, so the code only \
+                works when `keymule ui` runs in your own terminal. Start it there and use the \
+                code it prints"});
+        }
+        code_ok
     } else {
         matches!(
             crate::dialog::confirm(&format!(
@@ -639,8 +699,10 @@ fn pair(ctx: &Ctx, name: &str, key: &str, code: &str) -> Value {
         )
     };
     if !allowed {
-        return json!({"ok": false, "stderr": if known.is_empty() {
+        return json!({"ok": false, "stderr": if !code.is_empty() {
             "that code doesn't match the one `keymule ui` printed"
+        } else if known.is_empty() {
+            "type the code `keymule ui` printed in its terminal"
         } else {
             "a paired browser didn't allow it"
         }});
@@ -648,6 +710,7 @@ fn pair(ctx: &Ctx, name: &str, key: &str, code: &str) -> Value {
     let id = device.id.clone();
     match crate::approvals::add_device(vault.as_ref(), device) {
         Ok(()) => {
+            DEVICES_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             crate::http::audit("-", "PAIR", &id, 0);
             json!({"ok": true, "id": id})
         }

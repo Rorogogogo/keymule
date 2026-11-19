@@ -46,8 +46,9 @@ pub struct Spec<'a> {
     primary: &'a str,
     /// Return presses it.
     default: &'a str,
-    /// Escape presses it.
-    cancel: &'a str,
+    /// Escape presses it. Saying no is always safe, so the page lets even
+    /// an unpaired browser press it.
+    pub cancel: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     destructive: Option<&'a str>,
     pub secure: bool,
