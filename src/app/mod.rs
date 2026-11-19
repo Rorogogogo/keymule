@@ -2,4 +2,5 @@
 
 #[cfg(target_os = "macos")]
 pub mod menubar;
+pub mod stats;
 pub mod ui;
