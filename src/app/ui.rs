@@ -309,6 +309,23 @@ fn handle(ctx: &Ctx, mut stream: TcpStream) -> Result<()> {
             if method == "GET" && p == "/api/approvals" {
                 wait_for_news(&target);
             }
+            if method == "GET" && p == "/api/stats" {
+                let q = |k: &str| {
+                    target.split_once('?').and_then(|(_, q)| {
+                        q.split('&')
+                            .find_map(|kv| kv.strip_prefix(k)?.strip_prefix('='))
+                    })
+                };
+                let tz = q("tz").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let days = q("days").and_then(|v| v.parse().ok()).unwrap_or(30);
+                let out = crate::app::stats::load(tz, days);
+                return respond(
+                    &mut stream,
+                    200,
+                    "application/json",
+                    serde_json::to_string(&out)?.as_bytes(),
+                );
+            }
             let out = api(ctx, &method, p, &body);
             respond(
                 &mut stream,

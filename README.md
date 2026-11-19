@@ -105,7 +105,7 @@ Agent:  Build #482 failed in "Integration tests"…
 - 🩺 **Leak doctor.** `keymule doctor` finds tokens that already leaked into agent transcripts, configs, `.env` files or shell history.
 - 📦 **Adopt MCP secrets.** `keymule adopt` moves API keys out of MCP configs; remote (HTTP) servers connect through `keymule remote`, which adds the key header itself.
 - 🧩 **Service presets.** Bamboo, GitHub, GitLab, Jenkins, Stripe, OpenAI, or any HTTP API: the auth scheme, how to verify a token, and an API cheat sheet for the agent.
-- 📒 **Activity log.** Every use is logged to `~/.config/keymule/audit.log`, without secrets.
+- 📒 **Activity log and usage.** Every use is logged to `~/.config/keymule/audit.log`, without secrets. The page's **Usage** view adds it up: uses per day by kind (API calls, commands, MCP server starts, reveals) over 7, 30 or 90 days, each key's trend and last use, and the keys nobody has used lately.
 
 ---
 
