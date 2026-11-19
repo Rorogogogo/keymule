@@ -5,8 +5,9 @@
 const $ = id => document.getElementById(id)
 
 // The token is in the URL fragment keymule opened. Keep it for this tab only
-// and take it out of the address bar.
-const token = (() => {
+// and take it out of the address bar. Without one, a paired browser logs in
+// with its pairing key (see login below).
+let token = (() => {
   const m = location.hash.match(/t=([0-9a-f]{32})/)
   if (m) {
     try { sessionStorage.setItem('keymule-token', m[1]) } catch {}
@@ -88,14 +89,51 @@ const badge = (text, kind) => h('span', { class: `badge ${kind || ''}` }, text)
 const join = parts => parts.filter(Boolean).flatMap((p, i) => (i ? [' · ', p] : [p]))
 const mono = text => h('span', { class: 'mono' }, text)
 
-async function api(path, body) {
+async function api(path, body, retried) {
+  if (!token) await tryLogin()
+  const used = token
   const r = await fetch(path, {
     method: body === undefined ? 'GET' : 'POST',
-    headers: { 'X-Keymule-Token': token || '', 'Content-Type': 'application/json' },
+    headers: { 'X-Keymule-Token': used || '', 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  if (r.status === 403) throw new Error('forbidden')
+  if (r.status === 403) {
+    // `keymule ui` restarted with a new token: log in again, once.
+    if (!retried && (token !== used || await tryLogin()) && token !== used) return api(path, body, true)
+    throw new Error('forbidden')
+  }
   return r.json()
+}
+
+// A browser paired for keymule's questions opens the page without the link:
+// it signs a one-off challenge with its pairing key (which can't be read out
+// of the browser) and gets the token back. Nothing to log in with until the
+// browser is paired.
+async function login() {
+  const d = await idb('readonly', s => s.get('me')).catch(() => null)
+  if (!d) return false
+  const post = (path, body) => fetch(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(r => r.json())
+  const c = await post('/login/challenge', {})
+  if (!c.ok) return false
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, d.keyPair.privateKey, enc(`keymule-login-v1\n${c.nonce}`))
+  const r = await post('/login', { device: d.id, nonce: c.nonce, sig: b64(sig) })
+  if (!r.ok) return false
+  token = r.token
+  try { sessionStorage.setItem('keymule-token', token) } catch {}
+  return true
+}
+
+// One login at a time: a good one is reused for 2 s, and after a failed one
+// keymule waits 10 s before trying again.
+let loginTry = null
+function tryLogin() {
+  if (!loginTry) {
+    loginTry = login().catch(() => false)
+    loginTry.then(ok => setTimeout(() => { loginTry = null }, ok ? 2000 : 10000))
+  }
+  return loginTry
 }
 
 const TOAST_ICON = { ok: 'check', bad: 'x', run: 'spin' }
@@ -682,6 +720,7 @@ const EVENTS = {
   START: 'Started', EXEC: 'Ran', INSTALL: 'Copied to git', UNINSTALL: 'Removed from git',
   'GH-SECRET': 'Copied to GitHub', 'AUTO-ALLOW': 'Allowed', 'ALLOW-ALL-ON': 'Allow all on',
   'ALLOW-ALL-OFF': 'Allow all off', PAIR: 'Paired', 'BAD-APPROVAL': 'Refused',
+  'PAGE-LOGIN': 'Signed in', 'ANSWERED-IN-PAGE': 'Answered', 'DENIED-IN-PAGE': 'Denied',
   SSH: 'Logged in', CONVERT: 'Moved', RENAME: 'Renamed',
 }
 // keymule's own events have no credential: show them as keymule's.
@@ -884,7 +923,7 @@ async function pairThis(code) {
     const d = await myDevice()
     const r = await api('/api/pair', { name: browserName(), key: d.pub, code })
     if (!r.ok) ap.err = r.stderr || 'Pairing failed'
-    else { ap.code = ''; toast('This browser now answers keymule’s questions', 'ok') }
+    else { ap.code = ''; toast('Paired. This browser answers keymule’s questions and opens the page without the link', 'ok') }
   } catch (e) {
     ap.err = e.message
   }

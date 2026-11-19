@@ -171,6 +171,26 @@ pub fn verify(devices: &[Device], id: &str, request: &str, reply: &Reply) -> Res
     .map_err(|_| anyhow!("the signature doesn't match"))
 }
 
+/// What a paired browser signs to open the page without the link's token.
+pub fn login_message(nonce: &str) -> String {
+    format!("keymule-login-v1\n{nonce}")
+}
+
+/// Check a page login: `sig` over [`login_message`] by a paired browser.
+pub fn verify_login(devices: &[Device], device: &str, nonce: &str, sig: &str) -> Result<()> {
+    use p256::ecdsa::signature::Verifier;
+    let d = devices
+        .iter()
+        .find(|d| d.id == device)
+        .ok_or_else(|| anyhow!("that browser isn't paired"))?;
+    let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(&B64.decode(&d.key)?)
+        .map_err(|_| anyhow!("bad stored key"))?;
+    let sig = p256::ecdsa::Signature::from_slice(&B64.decode(sig)?)
+        .map_err(|_| anyhow!("bad signature"))?;
+    key.verify(login_message(nonce).as_bytes(), &sig)
+        .map_err(|_| anyhow!("the signature doesn't match"))
+}
+
 /// The AES key both sides derive from the ECDH secret.
 fn aes_key(id: &str, shared: &[u8]) -> [u8; 32] {
     derive("keymule-secret-v1", id, shared)
@@ -582,6 +602,27 @@ mod tests {
         assert!(
             open(&p256::SecretKey::generate(), "id1").is_none(),
             "only that browser"
+        );
+    }
+
+    #[test]
+    fn only_a_paired_browser_can_log_in() {
+        let (sk, dev) = browser();
+        let sig = sign(&sk, &login_message("n1"));
+        assert!(verify_login(std::slice::from_ref(&dev), &dev.id, "n1", &sig).is_ok());
+        assert!(
+            verify_login(std::slice::from_ref(&dev), &dev.id, "n2", &sig).is_err(),
+            "signed for another challenge"
+        );
+        assert!(
+            verify_login(&[], &dev.id, "n1", &sig).is_err(),
+            "not paired"
+        );
+        let (other, _) = browser();
+        let forged = sign(&other, &login_message("n1"));
+        assert!(
+            verify_login(std::slice::from_ref(&dev), &dev.id, "n1", &forged).is_err(),
+            "another key"
         );
     }
 

@@ -37,6 +37,9 @@ struct Ctx {
     /// only paired browser (cleared site data, another address) would lock
     /// you out for good.
     code_repairs: bool,
+    /// One-off challenges for a paired browser to log in with, and when
+    /// each runs out.
+    challenges: Mutex<Vec<(String, Instant)>>,
 }
 
 /// Bumped when a browser is paired or unpaired, so a waiting page hears.
@@ -112,6 +115,7 @@ fn bind(port: u16, code_repairs: bool) -> Result<(TcpListener, Arc<Ctx>)> {
         exe: std::env::current_exe()?,
         code: format!("{:03}-{:03}", n / 1000, n % 1000),
         code_repairs,
+        challenges: Mutex::new(Vec::new()),
     });
     Ok((listener, ctx))
 }
@@ -129,6 +133,49 @@ fn serve(listener: TcpListener, ctx: Arc<Ctx>) {
         std::thread::spawn(move || {
             let _ = handle(&ctx, stream);
         });
+    }
+}
+
+/// How long a login challenge stays good.
+const CHALLENGE_SECS: u64 = 60;
+
+fn challenge(ctx: &Ctx) -> Value {
+    let Ok(nonce) = random_token() else {
+        return json!({"ok": false});
+    };
+    let mut list = ctx.challenges.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    list.retain(|(_, until)| *until > now);
+    if list.len() >= 32 {
+        list.remove(0);
+    }
+    list.push((nonce.clone(), now + Duration::from_secs(CHALLENGE_SECS)));
+    json!({"ok": true, "nonce": nonce})
+}
+
+fn login(ctx: &Ctx, body: &Value) -> Value {
+    let field = |k: &str| body.get(k).and_then(Value::as_str).unwrap_or("");
+    let nonce = field("nonce");
+    // Each challenge works once, whatever the outcome.
+    let fresh = {
+        let mut list = ctx.challenges.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let at = list
+            .iter()
+            .position(|(n, until)| *until > now && same(n.as_bytes(), nonce.as_bytes()));
+        at.map(|i| list.remove(i)).is_some()
+    };
+    if !fresh {
+        return json!({"ok": false, "stderr": "that challenge ran out; try again"});
+    }
+    let vault = crate::store::vault();
+    let devices = crate::approvals::devices(vault.as_ref());
+    match crate::approvals::verify_login(&devices, field("device"), nonce, field("sig")) {
+        Ok(()) => {
+            crate::http::audit("-", "PAGE-LOGIN", field("device"), 0);
+            json!({"ok": true, "token": ctx.token})
+        }
+        Err(e) => json!({"ok": false, "stderr": e.to_string()}),
     }
 }
 
@@ -215,6 +262,35 @@ fn handle(ctx: &Ctx, mut stream: TcpStream) -> Result<()> {
             "text/css; charset=utf-8",
             APP_CSS.as_bytes(),
         ),
+        // A paired browser opens the page without the link's token: it signs
+        // a one-off challenge with its pairing key (which can't be read out
+        // of the browser) and gets the token back. No cookie: a browser sends
+        // 127.0.0.1's cookies to every port, so any local server would get it.
+        ("POST", "/login/challenge" | "/login") => {
+            let origin_ok = headers
+                .get("origin")
+                .is_some_and(|o| here.iter().any(|h| *o == format!("http://{h}")));
+            if !origin_ok {
+                return respond(
+                    &mut stream,
+                    403,
+                    "application/json",
+                    b"{\"error\":\"forbidden\"}",
+                );
+            }
+            let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let out = if path == "/login" {
+                login(ctx, &body)
+            } else {
+                challenge(ctx)
+            };
+            respond(
+                &mut stream,
+                200,
+                "application/json",
+                serde_json::to_string(&out)?.as_bytes(),
+            )
+        }
         (_, p) if p.starts_with("/api/") => {
             let token_ok = headers
                 .get("x-keymule-token")
