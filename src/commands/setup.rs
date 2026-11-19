@@ -17,7 +17,15 @@ pub(super) fn home() -> Result<std::path::PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn menubar_cmd(background: bool, login: Option<String>) -> Result<()> {
+pub(super) fn menubar_cmd(background: bool, login: Option<String>, restart: bool) -> Result<()> {
+    if restart {
+        menubar::restart()?;
+        println!(
+            "Restarted keymule in the menu bar ({}).",
+            crate::app::update::CURRENT
+        );
+        return Ok(());
+    }
     match login.as_deref() {
         Some(v) => {
             menubar::set_login(v == "on")?;
@@ -36,7 +44,7 @@ pub(super) fn menubar_cmd(background: bool, login: Option<String>) -> Result<()>
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) fn menubar_cmd(_background: bool, _login: Option<String>) -> Result<()> {
+pub(super) fn menubar_cmd(_background: bool, _login: Option<String>, _restart: bool) -> Result<()> {
     bail!("the menu bar app is macOS-only; use `keymule ui`")
 }
 

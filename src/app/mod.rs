@@ -4,3 +4,4 @@
 pub mod menubar;
 pub mod stats;
 pub mod ui;
+pub mod update;

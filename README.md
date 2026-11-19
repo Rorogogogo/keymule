@@ -254,7 +254,7 @@ up next to itself as `<name>.keymule-bak`.
 | `keymule allow [--dir D] [--off [--everywhere]] [--status]` | Allow all: one dialog (Cancel / Today / Always), then keymule stops asking in this repo (or `--dir ~` for every folder) (any program including shells, gh-secret, new hosts, reveal, the read-back guard, pasted secrets saved without asking). Deleting still asks; every skipped dialog is logged |
 | `keymule remote <name> <url> [--header "Name: value"]` | Connect to a remote (HTTP) MCP server, adding the headers keymule holds (used in configs). New URLs need your approval once |
 | `keymule ui [--no-open] [--port N]` | Open the local web page (127.0.0.1 only, port 7420 by default, token in the link it opens). Without a screen, keymule's questions wait there for a paired browser |
-| `keymule menubar [--background] [--login on\|off]` | keymule in the macOS menu bar: its page in its own window (no browser), with a Dock icon while the window is open. `keymule ui` opens that window when it's running |
+| `keymule menubar [--background] [--login on\|off] [--restart]` | keymule in the macOS menu bar: its page in its own window (no browser), with a Dock icon while the window is open. `keymule ui` opens that window when it's running. `--restart` restarts it on the keymule installed now, after an upgrade |
 | `keymule init [--dry-run]` | Set up every agent found (see [Agents](#agents)). On macOS it also puts keymule in the menu bar and makes it start at login (first setup only). The first time, it also offers allow-all for your home folder, with Always preselected |
 | `keymule mcp` | The MCP server (started by your agent) |
 | `keymule hook prompt [--agent claude\|codex\|cursor]` | The paste-to-save prompt hook |
@@ -435,6 +435,7 @@ time they're used, or all at once with `keymule migrate`.
 - The agent picks the URL in `add_credential`, so read the host in the dialog before typing your token.
 - After each update of a downloaded build, macOS asks once for access to the vault key (not once per secret), because the builds aren't signed with an Apple Developer ID yet. Building from source with `scripts/install-macos.sh` avoids it.
 - `keymule ui` never sees a secret, but anything that can read your terminal output can open it with the link it prints.
+- **Updates are a notice, never automatic.** Once a day the page and the menu bar ask GitHub for the latest release (`api.github.com/repos/Rorogogogo/keymule/releases/latest`, nothing about you or your keys is sent) and say when a newer one is out, with the command that upgrades: `brew upgrade keymule` or the install line. It's the only request keymule makes on its own; `KEYMULE_NO_UPDATE_CHECK=1` turns it off. After an upgrade, the page and the menu bar say when they're still running the old copy, with a Restart button.
 - `keymule reveal` asks before it shows anything, but the value is then on your screen: anyone watching it or recording it sees it, and Copy puts it on the clipboard for 30 seconds.
 - `keymule remote` speaks Streamable HTTP, not the older SSE-only transport. Keys in a URL's query string aren't adopted.
 - `keymule adopt` skips project `.mcp.json` files (usually shared; use `${VAR}` there) and command lines with shell syntax.
@@ -454,6 +455,7 @@ time they're used, or all at once with `keymule migrate`.
 - **0.13**: ✅ the menu bar app
 - **0.14**: ✅ questions in the page for Linux and dev containers
 - **0.15**: ✅ ready-made downloads, a one-line installer and Homebrew
+- **0.19**: ✅ page questions that never get stuck, notifications, signing in with a paired browser; the Usage view; update notices
 - **Next**: more presets, database auth proxy, SSH agent, git/docker credential helpers
 - **Later**: Touch ID approval for sensitive credentials, short-lived credentials (AWS STS, GitHub App tokens)
 

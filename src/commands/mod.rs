@@ -332,7 +332,11 @@ pub async fn run(cli: Cli) -> Result<()> {
         Cmd::Remote { name, url, headers } => {
             remote::run(store::vault().as_ref(), &name, &headers, &url).await
         }
-        Cmd::Menubar { background, login } => menubar_cmd(background, login),
+        Cmd::Menubar {
+            background,
+            login,
+            restart,
+        } => menubar_cmd(background, login, restart),
         Cmd::Init { dry_run } => init::run(dry_run),
         Cmd::Mcp => mcp::serve().await,
         Cmd::Hook {

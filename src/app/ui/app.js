@@ -165,6 +165,8 @@ async function refresh() {
     state.list = s.list
     state.audit = s.audit || []
     state.version = s.version
+    state.update = s.update || null
+    state.host = s.host || 'ui'
     state.live = true
     state.error = s.error
   } catch (e) {
@@ -834,6 +836,42 @@ function renderUsage() {
   ].flat().filter(Boolean)
 }
 
+// A newer release, or an upgrade this page's keymule hasn't restarted onto.
+// Quiet on purpose: everything still works. keymule never updates itself.
+function renderUpdate() {
+  const u = state.update
+  if (!u) return []
+  const copyCmd = cmd => h('button', {
+    class: 'btn', type: 'button',
+    onclick: async e => {
+      try { await navigator.clipboard.writeText(cmd); e.target.textContent = 'Copied' } catch { e.target.textContent = 'Couldn’t copy' }
+    },
+  }, 'Copy')
+  if (u.replaced) {
+    const menubar = state.host === 'menubar'
+    return [h('div', { class: 'pairing slim update' },
+      h('div', { class: 'pairtext' },
+        h('strong', null, 'keymule was updated. Restart it to use the new version'),
+        h('span', null, menubar
+          ? 'Restart your agents too (Claude Code, Codex, Cursor), so the keymule they started is the new one.'
+          : 'Stop `keymule ui` and start it again. Restart your agents too, so the keymule they started is the new one.')),
+      menubar ? h('div', { class: 'pairgo' }, h('button', {
+        class: 'btn primary', type: 'button',
+        onclick: async e => {
+          e.target.disabled = true; e.target.textContent = 'Restarting…'
+          try { await api('/api/restart', {}) } catch {}
+        },
+      }, 'Restart now')) : null)]
+  }
+  if (!u.latest) return []
+  return [h('div', { class: 'pairing slim update' },
+    h('div', { class: 'pairtext' },
+      h('strong', null, `keymule ${u.latest} is out`),
+      h('span', null, `You have ${u.current}. `, h('a', { href: u.notes, target: '_blank', rel: 'noopener' }, 'What’s new'), '. To update, run:'),
+      h('code', { class: 'updcmd' }, u.command)),
+    h('div', { class: 'pairgo' }, copyCmd(u.command)))]
+}
+
 function renderBanner() {
   // No keychain and no passphrase: nothing can be saved, so say how to fix it first.
   const vp = state.list?.vault_problem
@@ -970,6 +1008,7 @@ function render() {
   const list = state.list
   $('stats').replaceChildren(...renderStats())
   $('banner').replaceChildren(...renderBanner())
+  draw('update', [state.update, state.host], renderUpdate)
   const typing = el => el.contains(document.activeElement) && document.activeElement.matches('input, select, textarea, .mi')
   const busy = [...state.busy]
   const rowState = [state.view, state.filter, state.describing, state.menu, busy]
