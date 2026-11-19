@@ -73,11 +73,20 @@ pub fn run(open: bool, port: u16) -> Result<()> {
         .write(true)
         .open("/dev/tty")
         .is_ok();
+    crate::app::update::remember_binary();
     let (listener, ctx) = bind(port, at_terminal)?;
     let url = ctx.url();
     println!(
         "keymule ui is running at {url}\nOnly this machine can reach it. Press Ctrl-C to stop."
     );
+    if let Some(v) = crate::app::update::available() {
+        println!(
+            "keymule {v} is out (this is {}). Upgrade: {}",
+            crate::app::update::CURRENT,
+            crate::app::update::upgrade_command(&std::env::current_exe().unwrap_or_default())
+        );
+    }
+    crate::app::update::watch();
     if crate::dialog::page_mode() {
         println!(
             "Questions from keymule wait in this page. To answer them, click \"Pair this \
@@ -96,8 +105,10 @@ pub fn run(open: bool, port: u16) -> Result<()> {
 /// (with its token). Used by the macOS menu-bar app.
 #[cfg(target_os = "macos")]
 pub fn start() -> Result<String> {
+    crate::app::update::remember_binary();
     let (listener, ctx) = bind(DEFAULT_PORT, false)?;
     let url = ctx.url();
+    crate::app::update::watch();
     std::thread::spawn(move || serve(listener, ctx));
     Ok(url)
 }
@@ -537,6 +548,9 @@ fn api(ctx: &Ctx, method: &str, path: &str, body: &[u8]) -> Value {
                 .unwrap_or(Value::Null);
             json!({
                 "version": env!("CARGO_PKG_VERSION"),
+                "update": crate::app::update::status(),
+                // Who serves the page decides how to restart it.
+                "host": if crate::app::update::in_menubar() { "menubar" } else { "ui" },
                 "list": parsed,
                 "error": if list["ok"] == true { Value::Null } else { list["stderr"].clone() },
                 "audit": audit_tail(),
@@ -568,6 +582,14 @@ fn api(ctx: &Ctx, method: &str, path: &str, body: &[u8]) -> Value {
                 Ok(()) => json!({"ok": true}),
                 Err(e) => json!({"ok": false, "stderr": e.to_string()}),
             }
+        }
+        ("POST", "/api/restart") => {
+            #[cfg(target_os = "macos")]
+            if crate::app::update::in_menubar() {
+                crate::menubar::restart_detached();
+                return json!({"ok": true});
+            }
+            json!({"ok": false, "stderr": "stop `keymule ui` and start it again"})
         }
         ("POST", "/api/approvals/deny") => match crate::approvals::deny(field("id")) {
             Ok(()) => json!({"ok": true}),

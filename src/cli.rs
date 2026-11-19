@@ -291,6 +291,9 @@ pub enum Cmd {
         /// Start it at login, or stop that, then exit.
         #[arg(long, value_name = "on|off", value_parser = ["on", "off"])]
         login: Option<String>,
+        /// Restart it on the keymule installed now (after an upgrade).
+        #[arg(long)]
+        restart: bool,
     },
     /// Set keymule up in every agent found: Claude Code, Claude Desktop,
     /// Codex, Cursor, Antigravity (MCP server, paste hook, instructions).

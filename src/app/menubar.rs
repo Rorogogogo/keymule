@@ -26,7 +26,10 @@ const LABEL: &str = "dev.keymule.menubar";
 
 enum Msg {
     Open,
+    Quit,
     Menu(MenuEvent),
+    /// A newer release (if any) and whether the binary on disk changed.
+    Status(Option<String>, bool),
 }
 
 fn socket() -> Result<PathBuf> {
@@ -47,6 +50,73 @@ fn plist_path() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(format!("Library/LaunchAgents/{LABEL}.plist")))
 }
 
+/// The path to start keymule by. For Homebrew that's the `bin/keymule`
+/// link, not the versioned Cellar folder an upgrade replaces.
+fn stable_exe() -> Result<PathBuf> {
+    let exe = std::env::current_exe()?.canonicalize()?;
+    let s = exe.to_string_lossy();
+    if let Some((prefix, _)) = s.split_once("/Cellar/keymule/") {
+        let link = PathBuf::from(prefix).join("bin/keymule");
+        if link.exists() {
+            return Ok(link);
+        }
+    }
+    Ok(exe)
+}
+
+fn gui_domain() -> Result<String> {
+    let uid = std::process::Command::new("id").arg("-u").output()?;
+    Ok(format!(
+        "gui/{}",
+        String::from_utf8_lossy(&uid.stdout).trim()
+    ))
+}
+
+/// Restart the menu bar app on the keymule that's installed now (after an
+/// upgrade). launchd keeps the old binary's code signature for its job, so
+/// a plain `launchctl kickstart` fails after an upgrade; the job has to be
+/// unloaded and loaded again.
+pub fn restart() -> Result<()> {
+    let was_running = open_running_quietly();
+    if starts_at_login() {
+        set_login(true)?; // point the login item at this binary
+        let domain = gui_domain()?;
+        let _ = std::process::Command::new("launchctl")
+            .args(["bootout", &format!("{domain}/{LABEL}")])
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    if was_running {
+        // Not started by launchd (or bootout didn't stop it): ask it to quit.
+        if let Ok(mut s) = socket().and_then(|p| Ok(UnixStream::connect(p)?)) {
+            let _ = s.write_all(b"quit\n");
+        }
+        for _ in 0..50 {
+            if !open_running_quietly() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    launch()?;
+    Ok(())
+}
+
+/// Restart from a separate process, so this one can be stopped (the menu's
+/// and the page's "Restart" buttons).
+pub fn restart_detached() {
+    use std::os::unix::process::CommandExt;
+    if let Ok(exe) = stable_exe() {
+        let _ = std::process::Command::new(exe)
+            .args(["menubar", "--restart"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn();
+    }
+}
+
 pub fn starts_at_login() -> bool {
     plist_path().is_ok_and(|p| p.exists())
 }
@@ -60,7 +130,7 @@ pub fn set_login(on: bool) -> Result<()> {
         }
         return Ok(());
     }
-    let exe = std::env::current_exe()?.canonicalize()?;
+    let exe = stable_exe()?;
     let esc = |s: &str| {
         s.replace('&', "&amp;")
             .replace('<', "&lt;")
@@ -100,8 +170,7 @@ pub fn launch() -> Result<bool> {
         return Ok(false);
     }
     if starts_at_login() {
-        let uid = std::process::Command::new("id").arg("-u").output()?;
-        let domain = format!("gui/{}", String::from_utf8_lossy(&uid.stdout).trim());
+        let domain = gui_domain()?;
         let plist = plist_path()?;
         let loaded = std::process::Command::new("launchctl")
             .args(["bootstrap", &domain])
@@ -120,7 +189,7 @@ pub fn launch() -> Result<bool> {
         }
     }
     use std::os::unix::process::CommandExt;
-    let exe = std::env::current_exe()?;
+    let exe = stable_exe()?;
     std::process::Command::new(exe)
         .args(["menubar", "--background"])
         .stdin(std::process::Stdio::null())
@@ -259,6 +328,7 @@ pub fn run(background: bool) -> Result<()> {
     let sock = socket()?;
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock).context("can't listen for other keymule commands")?;
+    crate::app::update::set_in_menubar();
     let url = crate::ui::start()?;
     let base = url.split('#').next().unwrap_or(&url).to_string();
 
@@ -271,12 +341,28 @@ pub fn run(background: bool) -> Result<()> {
         for conn in listener.incoming() {
             let Ok(mut conn) = conn else { continue };
             let mut buf = [0u8; 16];
-            if conn
-                .read(&mut buf)
-                .is_ok_and(|n| buf[..n].starts_with(b"open"))
-            {
+            let Ok(n) = conn.read(&mut buf) else { continue };
+            if buf[..n].starts_with(b"open") {
                 let _ = proxy.send_event(Msg::Open);
+            } else if buf[..n].starts_with(b"quit") {
+                let _ = proxy.send_event(Msg::Quit);
             }
+        }
+    });
+    // Watch for a newer release and for an upgrade on disk, for the menu.
+    let proxy = event_loop.create_proxy();
+    std::thread::spawn(move || {
+        let mut last = None;
+        loop {
+            let now = (
+                crate::app::update::available(),
+                crate::app::update::replaced(),
+            );
+            if last.as_ref() != Some(&now) {
+                let _ = proxy.send_event(Msg::Status(now.0.clone(), now.1));
+                last = Some(now);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(60));
         }
     });
     let proxy = event_loop.create_proxy();
@@ -330,6 +416,12 @@ pub fn run(background: bool) -> Result<()> {
     let browser = MenuItem::with_id("browser", "Open in Browser", true, None);
     let login = CheckMenuItem::with_id("login", "Start at Login", true, starts_at_login(), None);
     let quit = MenuItem::with_id("quit", "Quit keymule", true, None);
+    // Shown at the top only when there's news: a newer release, or an
+    // upgrade that needs a restart to take effect.
+    let news = MenuItem::with_id("news", "", true, None);
+    let news_sep = PredefinedMenuItem::separator();
+    let mut news_shown = false;
+    let mut news_restart = false;
     let tray_menu = Menu::with_items(&[
         &open,
         &browser,
@@ -359,10 +451,43 @@ pub fn run(background: bool) -> Result<()> {
                 show = !background;
             }
             Event::UserEvent(Msg::Open) => show = true,
+            Event::UserEvent(Msg::Quit) => {
+                let _ = std::fs::remove_file(&sock);
+                tray.take();
+                *flow = ControlFlow::Exit;
+            }
+            Event::UserEvent(Msg::Status(latest, replaced)) => {
+                news_restart = replaced;
+                let text = if replaced {
+                    Some("Restart keymule to Finish Updating".to_string())
+                } else {
+                    latest.map(|v| format!("keymule {v} Is Out: How to Update…"))
+                };
+                match text {
+                    Some(t) => {
+                        news.set_text(t);
+                        if !news_shown {
+                            let _ = tray_menu.insert_items(&[&news, &news_sep], 0);
+                            news_shown = true;
+                        }
+                    }
+                    None if news_shown => {
+                        let _ = tray_menu.remove(&news);
+                        let _ = tray_menu.remove(&news_sep);
+                        news_shown = false;
+                    }
+                    None => {}
+                }
+            }
             // A click on the Dock icon.
             Event::Reopen { .. } => show = true,
             Event::UserEvent(Msg::Menu(e)) => match e.id.0.as_str() {
                 "open" => show = true,
+                // Restart on the new binary, from a separate process (this
+                // one is about to be stopped). Otherwise the page shows how
+                // to update.
+                "news" if news_restart => restart_detached(),
+                "news" => show = true,
                 "browser" => {
                     let _ = std::process::Command::new("open").arg(&url).status();
                 }
