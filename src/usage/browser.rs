@@ -238,30 +238,40 @@ fn endpoint_args(command: &[String], ws: &str) -> Result<Vec<String>> {
 /// Every stored website password, in every form it could turn up in.
 struct Hidden {
     forms: Vec<String>,
-    checked: Instant,
-    stamp: Option<SystemTime>,
+    stamp: Stamp,
 }
+
+/// When the files a login lives in last changed: credentials.toml (a new
+/// login) and the vault (a new or rotated password).
+type Stamp = Vec<Option<SystemTime>>;
 
 impl Hidden {
     fn new() -> Self {
         let mut h = Self {
             forms: vec![],
-            checked: Instant::now(),
-            stamp: None,
+            stamp: vec![],
         };
         h.reload();
         h
     }
 
-    fn vault_stamp() -> Option<SystemTime> {
-        std::fs::metadata(store::config_dir().ok()?.join("vault.enc"))
-            .and_then(|m| m.modified())
-            .ok()
+    fn files_stamp() -> Stamp {
+        let mut files = vec![];
+        if let Ok(dir) = store::config_dir() {
+            files.push(dir.join("credentials.toml"));
+            files.push(dir.join("vault.enc"));
+        }
+        if let Some(test) = std::env::var_os("KEYMULE_TEST_VAULT") {
+            files.push(PathBuf::from(test));
+        }
+        files
+            .iter()
+            .map(|f| std::fs::metadata(f).and_then(|m| m.modified()).ok())
+            .collect()
     }
 
     fn reload(&mut self) {
-        self.stamp = Self::vault_stamp();
-        self.checked = Instant::now();
+        self.stamp = Self::files_stamp();
         let Ok(store) = Store::load() else { return };
         let vault = store::vault();
         let mut forms: Vec<String> = store
@@ -285,13 +295,11 @@ impl Hidden {
     }
 
     /// Hide every stored password in one line of the server's output. A
-    /// login added since is picked up when the vault changes.
+    /// login added or rotated since is picked up before the line goes out
+    /// (checking costs a couple of file stats).
     fn scrub(&mut self, line: &str) -> String {
-        if self.checked.elapsed() > Duration::from_secs(2) {
-            if Self::vault_stamp() != self.stamp {
-                self.reload();
-            }
-            self.checked = Instant::now();
+        if Self::files_stamp() != self.stamp {
+            self.reload();
         }
         let mut out = line.to_string();
         for f in &self.forms {
@@ -336,8 +344,7 @@ pub async fn run(command: &[String]) -> Result<()> {
             .await
             .unwrap_or_else(|_| Hidden {
                 forms: vec![],
-                checked: Instant::now(),
-                stamp: None,
+                stamp: vec![],
             });
         let mut lines = BufReader::new(child_out).lines();
         let mut out = tokio::io::stdout();
@@ -466,21 +473,36 @@ const FILL: &str = r#"async ({ origin, username, password, phase }) => {
     || all(root, 'button, [role="button"]').find((b) => /^\s*(sign in|log in|login|continue|next|submit)\s*$/i.test(b.textContent || b.value || ''));
   await new Promise((r) => setTimeout(r, 200));
   if (location.origin !== origin) return { status: 'origin', at: location.origin };
+  // Gone after a page load: AFTER tells a reloaded sign-in page (a refusal)
+  // from the same page still waiting.
+  if (pw) window.__keymuleSubmitted = true;
   if (button) button.click();
   else if (form && form.requestSubmit) form.requestSubmit();
   else field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
   return { status: pw ? 'submitted' : 'username' };
 }"#;
 
-/// After submitting: where the tab is, and whether a password field still
-/// holds a value (clearing it, so it doesn't sit in the page).
+/// After submitting: where the tab is, whether a sign-in form is still
+/// showing (`form`: a visible password field, filled or not), whether the
+/// page loaded anew since (`fresh`), whether it has finished loading
+/// (`ready`: mid-redirect a page is blank, which isn't a verdict), and
+/// whether a field still holds a value
+/// (clearing it with `clear`, so the password doesn't sit in the page).
 const AFTER: &str = r#"({ clear }) => {
-  const held = [...document.querySelectorAll('input[type="password"]')].filter((e) => e.value);
+  const all = [...document.querySelectorAll('input[type="password"]')];
+  const held = all.filter((e) => e.value);
   if (clear) held.forEach((e) => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(e, '');
     e.dispatchEvent(new Event('input', { bubbles: true }));
   });
-  return { url: location.href, held: held.length > 0 };
+  const form = all.some((e) => {
+    const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+  });
+  return {
+    url: location.href, held: held.length > 0, form, fresh: !window.__keymuleSubmitted,
+    ready: document.readyState === 'complete',
+  };
 }"#;
 
 /// What `sign_in` needs from a stored website login.
@@ -644,15 +666,20 @@ pub async fn sign_in(
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
     };
-    // Give the page a moment, then make sure the password doesn't stay in it.
+    // Wait for the outcome: the sign-in form gone (signed in), or a new page
+    // that shows it again (refused). A form still up on the same page after
+    // 8 seconds means the site wants something else (a code, a CAPTCHA) or
+    // showed an error in place. Then make sure the password doesn't stay.
     let mut after = None;
     if result.is_ok() {
         for _ in 0..16 {
             tokio::time::sleep(Duration::from_millis(500)).await;
             if let Some(v) = cdp.run(&session, AFTER, &json!({ "clear": false })).await? {
-                let done = !v["held"].as_bool().unwrap_or(false);
+                let form = v["form"].as_bool().unwrap_or(false);
+                let fresh = v["fresh"].as_bool().unwrap_or(false);
+                let ready = v["ready"].as_bool().unwrap_or(false);
                 after = Some(v);
-                if done {
+                if ready && (!form || fresh) {
                     break;
                 }
             }
@@ -674,7 +701,7 @@ pub async fn sign_in(
         .to_string();
     let still = after
         .as_ref()
-        .is_some_and(|v| v["held"].as_bool().unwrap_or(false));
+        .is_none_or(|v| v["form"].as_bool().unwrap_or(false));
     // In the activity log: 200 when the form went away, 401 when it's still there.
     crate::http::audit(
         name,
@@ -763,8 +790,7 @@ mod tests {
                 "hunter2-secret".into(),
                 "hunter2-secret".replace('-', "%2D"),
             ],
-            checked: Instant::now(),
-            stamp: Hidden::vault_stamp(),
+            stamp: Hidden::files_stamp(),
         };
         let line = r#"{"result":{"content":[{"text":"value: hunter2-secret"}]}}"#;
         let out = h.scrub(line);
