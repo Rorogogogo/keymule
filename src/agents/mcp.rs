@@ -26,7 +26,9 @@ Jenkins, internal APIs...), call list_credentials first and use http_request wit
 credential name. For a server the user logs in to with SSH (host or IP, username, password or \
 key), call add_ssh_credential, then run commands there with `keymule ssh <name> -- <command>`; \
 add_mcp_secret is only for secrets an MCP server reads, never for SSH logins or passwords for \
-other tools (those are add_credential with service password). Never ask the user to paste a token, password or API key into the chat. If no \
+other tools (those are add_credential with service password). To sign in to a website in a \
+browser, store the login with add_website_login and call sign_in once its sign-in page is open \
+in the keymule browser (`keymule browser -- <browser MCP server>`). Never ask the user to paste a token, password or API key into the chat. If no \
 matching credential exists, call add_credential: keymule shows a secure dialog on the user's \
 screen where they type the secret, and you never see it. Ask the user for the service's base URL \
 first if needed (URLs are not secret). If a token stops working (HTTP 401), offer \
@@ -113,6 +115,26 @@ pub struct SshArgs {
     /// What it's for, in a line, e.g. "Vultr VPS in Sydney (production)".
     #[serde(default)]
     pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LoginArgs {
+    /// Name to store it under, e.g. "github-login". Letters, digits, '-' and '_'.
+    pub name: String,
+    /// The site's sign-in page (or just the site), e.g. "https://github.com/login". The
+    /// password is only ever filled into pages on exactly this origin. URLs are not secret.
+    pub url: String,
+    /// The username or email the user signs in with. Ask the user for it.
+    pub username: String,
+    /// What it's for, in a line, e.g. "GitHub, my personal account".
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SignInArgs {
+    /// The website login's name, from list_credentials.
+    pub credential: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -305,6 +327,13 @@ fn other_kind_prompt(kind: presets::Kind, name: &str, ssh: Option<&SshTarget>) -
             ),
             true,
         ),
+        presets::Kind::Login => (
+            format!(
+                "Type the new password for \"{name}\"\n\nkeymule only fills it into that site's \
+                 sign-in page, and asks you each time."
+            ),
+            false,
+        ),
         _ => (
             format!(
                 "Type the password for \"{name}\"\n\nIt's only ever handed to programs you approve."
@@ -418,6 +447,12 @@ async fn add(a: AddArgs) -> anyhow::Result<String> {
              (and port, auth=\"key\" for a private key)"
         );
     }
+    if preset.kind == presets::Kind::Login {
+        bail!(
+            "a website login needs its site and username: call add_website_login with name, url \
+             (the sign-in page) and username"
+        );
+    }
     if preset.kind != presets::Kind::Http {
         return add_other_kind(name, preset, a.description).await;
     }
@@ -529,6 +564,64 @@ pub async fn add_ssh(a: SshArgs) -> anyhow::Result<String> {
         target.auth_label(),
         name = a.name,
     ))
+}
+
+/// Store a website login. The password is typed in a dialog.
+async fn add_login(a: LoginArgs) -> anyhow::Result<String> {
+    validate_name(&a.name)?;
+    let cred = crate::browser::login_credential(
+        a.url.trim(),
+        &a.username,
+        a.description.unwrap_or_default(),
+    )?;
+    let taken = |s: &Store| s.creds.contains_key(&a.name) || s.servers.contains_key(&a.name);
+    if taken(&Store::load()?) {
+        bail!("\"{}\" already exists; pick another name", a.name);
+    }
+    let Auth::Basic { username } = cred.auth.clone() else {
+        unreachable!("a login signs in with a username")
+    };
+    let password = ask_secret(format!(
+        "Type the password for {username} on {}\n\nkeymule only fills it into {} in the keymule \
+         browser, and asks you each time. Your agent never sees it.",
+        cred.hosts[0], cred.url
+    ))
+    .await?;
+    let password = check_other_kind(presets::Kind::Password, &password)?;
+    let mut store = Store::load()?;
+    if taken(&store) {
+        bail!("\"{}\" was added meanwhile; nothing was saved", a.name);
+    }
+    let vault = store::vault();
+    Sealed::new(password, &cred).save(vault.as_ref(), &a.name)?;
+    let origin = cred.url.clone();
+    store.creds.insert(a.name.clone(), cred);
+    if let Err(e) = store.save() {
+        let _ = vault.delete(&a.name);
+        return Err(e);
+    }
+    Ok(format!(
+        "Saved \"{name}\" (website login for {username} on {origin}). To sign in, open the \
+         site's sign-in page in the keymule browser, then call sign_in(credential=\"{name}\"). \
+         The user approves each sign-in; you never see the password.",
+        name = a.name
+    ))
+}
+
+async fn sign_in(a: SignInArgs) -> anyhow::Result<String> {
+    let name = a.credential.clone();
+    let login = tokio::task::spawn_blocking(move || {
+        crate::browser::load_login(store::vault().as_ref(), &name)
+    })
+    .await??;
+    // Not the allow-all shortcut: every sign-in asks.
+    let ask = |q: &str| {
+        let q = q.to_string();
+        std::thread::spawn(move || dialog::confirm(&q))
+            .join()
+            .map_err(|_| anyhow!("the dialog failed"))?
+    };
+    crate::browser::sign_in(&a.credential, login, ask).await
 }
 
 async fn convert(a: ConvertArgs) -> anyhow::Result<String> {
@@ -914,8 +1007,9 @@ impl Server {
         if store.creds.is_empty() && store.servers.is_empty() && none_held {
             return Ok(text(
                 "No credentials stored yet. Use add_credential (services: bamboo, github, gitlab, \
-                 jenkins, generic, password) or add_ssh_credential for an SSH login; the user \
-                 types the secret into a secure dialog.",
+                 jenkins, generic, password), add_ssh_credential for an SSH login or \
+                 add_website_login for a website sign-in; the user types the secret into a \
+                 secure dialog.",
             ));
         }
         let list: Vec<_> = store
@@ -924,6 +1018,24 @@ impl Server {
             .map(|(name, c)| {
                 let preset = presets::get_or_generic(&c.service);
                 let target = sealed.get(name).and_then(|s| s.ssh.clone()).or(c.ssh.clone());
+                if preset.kind == presets::Kind::Login {
+                    let s = sealed.get(name).map(|s| s.apply(c)).unwrap_or_else(|| c.clone());
+                    let username = match &s.auth {
+                        Auth::Basic { username } => username.clone(),
+                        _ => String::new(),
+                    };
+                    return serde_json::json!({
+                        "name": name,
+                        "kind": "Website login (not for http_request)",
+                        "site": s.hosts.first().map(|h| crate::browser::origin_for(h, &c.url)),
+                        "username": username,
+                        "description": c.description,
+                        "how_to_use": [format!(
+                            "open the site's sign-in page in the keymule browser (your browser tool run through `keymule browser -- ...`), then sign_in(credential=\"{name}\"); the user approves each sign-in"
+                        )],
+                        "needs_setup": serde_json::Value::Null,
+                    });
+                }
                 if preset.kind == presets::Kind::Ssh {
                     return serde_json::json!({
                         "name": name,
@@ -958,7 +1070,7 @@ impl Server {
                 } else {
                     how.push(preset.hint.replace("<name>", name));
                 }
-                if c.service != "github" {
+                if c.service != "github" && preset.kind != presets::Kind::Login {
                     how.push(format!(
                         "GitHub Actions secret: keymule gh-secret --repo <owner>/<repo> <SECRET_NAME>={name} (several in one go: add more SECRET=name)"
                     ));
@@ -1056,13 +1168,33 @@ impl Server {
     }
 
     #[tool(
-        description = "Store a new credential. keymule opens a secure dialog on the user's screen where they type it; you never see it. An HTTP API token is verified against the service and locked to the URL's host (ask the user for the base URL first if the service needs one). A password, private key (service private-key: the dialog takes several lines) or AWS key pair (service aws) needs no URL; it's only handed to programs with keymule exec. For logging in to a server over SSH, use add_ssh_credential instead."
+        description = "Store a new credential. keymule opens a secure dialog on the user's screen where they type it; you never see it. An HTTP API token is verified against the service and locked to the URL's host (ask the user for the base URL first if the service needs one). A password, private key (service private-key: the dialog takes several lines) or AWS key pair (service aws) needs no URL; it's only handed to programs with keymule exec. For logging in to a server over SSH, use add_ssh_credential instead; for signing in to a website in a browser, add_website_login."
     )]
     async fn add_credential(
         &self,
         Parameters(args): Parameters<AddArgs>,
     ) -> Result<CallToolResult, McpError> {
         Ok(done(add(args).await))
+    }
+
+    #[tool(
+        description = "Store a username and password for one website, so a browser agent can sign in without seeing the password. Give the sign-in page's URL and the username (ask the user for both; neither is secret). keymule opens a secure dialog where the user types the password. It's only ever filled into pages on exactly that site's origin, with sign_in, after the user approves. Use this for website sign-ins, not add_credential."
+    )]
+    async fn add_website_login(
+        &self,
+        Parameters(args): Parameters<LoginArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(done(add_login(args).await))
+    }
+
+    #[tool(
+        description = "Sign in to a website with a stored website login, in the keymule browser (the Chrome your browser tool uses when it runs through `keymule browser -- ...`). Open the site's sign-in page with your browser tool first. keymule asks the user, checks the tab is on exactly the login's site, types the username and password into the page and submits; two-step forms (username, then password) are handled. You never see the password, and it's hidden from the browser tool's replies. Then take a snapshot to carry on."
+    )]
+    async fn sign_in(
+        &self,
+        Parameters(args): Parameters<SignInArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(done(sign_in(args).await))
     }
 
     #[tool(

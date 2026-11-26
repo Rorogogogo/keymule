@@ -2,6 +2,7 @@
 //! servers with it, SSH logins, remote MCP headers, git's credential store and GitHub
 //! Actions secrets.
 
+pub mod browser;
 pub mod cliexec;
 pub mod ghsecret;
 pub mod http;

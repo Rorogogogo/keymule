@@ -26,12 +26,15 @@ use app::ui;
 use consent::{approvals, dialog, trust, tty};
 use scan::{detect, doctor};
 use storage::{presets, redact, store, vault};
-use usage::{cliexec, ghsecret, http, install, remote, servers, ssh};
+use usage::{browser, cliexec, ghsecret, http, install, remote, servers, ssh};
 
 use clap::Parser;
 
 #[tokio::main]
 async fn main() {
+    // An MCP server outlives an upgrade; remember the binary so a refused
+    // keychain read can say why.
+    app::update::remember_binary();
     // ssh runs keymule as its password helper (see `keymule ssh`).
     if let Some(code) = ssh::askpass_main() {
         std::process::exit(code);
