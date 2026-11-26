@@ -499,11 +499,21 @@ pre.plan {
 }
 .asktext > :last-child { margin-bottom: 0; }
 .askcode.revealval { font-size: 13px; color: var(--ink); user-select: all; max-height: 240px; overflow: auto; }
-.askval { display: block; width: 100%; margin-top: 12px; font-family: var(--mono); }
+.askvalwrap { position: relative; margin-top: 12px; }
+.askval { display: block; width: 100%; padding-right: 36px; font-family: var(--mono); }
 .askval.multi {
-  height: 120px; padding: 8px 10px; resize: none; white-space: pre; overflow: auto;
+  height: 120px; padding: 8px 36px 8px 10px; resize: none; white-space: pre; overflow: auto;
   font-size: 12px; line-height: 1.5; -webkit-text-security: disc;
 }
+.askval.multi.shown { -webkit-text-security: none; }
+.peek {
+  position: absolute; top: 4px; right: 4px; width: 24px; height: 24px; padding: 0;
+  display: grid; place-items: center; border: 0; border-radius: 5px;
+  color: var(--ink3); background: transparent; cursor: pointer;
+}
+.peek:hover { color: var(--ink); background: var(--subtle); }
+.peek:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
+.peek svg { width: 15px; height: 15px; }
 .askerr { color: var(--bad); font-size: 12.5px; margin-top: 10px !important; }
 .askfoot {
   display: flex; justify-content: flex-end; align-items: center; gap: 8px;

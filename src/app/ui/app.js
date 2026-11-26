@@ -61,6 +61,7 @@ const ICONS = {
   server: [['rect', { x: 3, y: 3.5, width: 18, height: 7, rx: 2 }], ['rect', { x: 3, y: 13.5, width: 18, height: 7, rx: 2 }], ['path', { d: 'M7 7h.01M7 17h.01' }]],
   warn: [['path', { d: 'M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z' }], ['path', { d: 'M12 9v4M12 17h.01' }]],
   eye: [['path', { d: 'M1.5 12S5.5 5 12 5s10.5 7 10.5 7-4 7-10.5 7S1.5 12 1.5 12z' }], ['circle', { cx: 12, cy: 12, r: 3 }]],
+  eyeOff: [['path', { d: 'M10.7 5.1A10.7 10.7 0 0 1 22.5 12a17 17 0 0 1-2 2.9M14.1 14.2a3 3 0 0 1-4.2-4.2M17.5 17.5A10.5 10.5 0 0 1 1.5 12a17 17 0 0 1 5-5.5M2 2l20 20' }]],
   check: [['circle', { cx: 12, cy: 12, r: 9.5 }], ['path', { d: 'm8 12.5 2.5 2.5L16 9.5' }]],
   x: [['circle', { cx: 12, cy: 12, r: 9.5 }], ['path', { d: 'm15 9-6 6M9 9l6 6' }]],
   shield: [['path', { d: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z' }], ['path', { d: 'm9 12 2 2 4-4' }]],
@@ -1308,7 +1309,23 @@ function secretField(item, s) {
     },
   })
   el.value = ap.value
-  return el
+  // Hidden again for each new question; the eye shows what was typed.
+  if (ap.peekId !== item.req.id) { ap.peekId = item.req.id; ap.peek = false }
+  const peek = h('button', {
+    class: 'peek', type: 'button',
+    onmousedown: e => e.preventDefault(), // the cursor stays in the field
+    onclick: () => { ap.peek = !ap.peek; draw() },
+  })
+  const draw = () => {
+    peek.replaceChildren(icon(ap.peek ? 'eyeOff' : 'eye'))
+    peek.title = ap.peek ? 'Hide' : 'Show'
+    peek.setAttribute('aria-label', ap.peek ? 'Hide the value' : 'Show the value')
+    peek.setAttribute('aria-pressed', String(ap.peek))
+    if (s.multiline) el.classList.toggle('shown', ap.peek)
+    else el.type = ap.peek ? 'text' : 'password'
+  }
+  draw()
+  return h('div', { class: 'askvalwrap' }, el, peek)
 }
 
 const ASK_ICON = { key: 'key', unlock: 'shield', trash: 'x', eye: 'eye', shield: 'shield' }
