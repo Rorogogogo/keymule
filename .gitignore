@@ -1,1 +1,4 @@
 /target
+
+# written by Playwright MCP when tests/browser_e2e.py runs it
+.playwright-mcp/
