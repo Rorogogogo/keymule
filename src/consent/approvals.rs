@@ -479,13 +479,24 @@ pub fn version() -> String {
             .ok()
             .and_then(|v| v["id"].as_str().map(str::to_string))
     };
-    let mut ids: Vec<String> = pending().iter().filter_map(|t| id(t)).collect();
-    ids.extend(
-        shows()
-            .iter()
-            .filter_map(|v| v["id"].as_str().map(str::to_string)),
-    );
-    ids.join(",")
+    let pending: Vec<String> = pending().iter().filter_map(|t| id(t)).collect();
+    let shows: Vec<String> = shows()
+        .iter()
+        .filter_map(|v| v["id"].as_str().map(str::to_string))
+        .collect();
+    version_of(&pending, &shows)
+}
+
+/// A value to show keeps its question's id, so mark it: otherwise answering
+/// Show (the id moving from pending to shows) wouldn't change the version,
+/// and the page's long-poll would only get the value when it timed out.
+fn version_of(pending: &[String], shows: &[String]) -> String {
+    pending
+        .iter()
+        .cloned()
+        .chain(shows.iter().map(|id| format!("show:{id}")))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[cfg(test)]

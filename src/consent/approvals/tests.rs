@@ -144,3 +144,11 @@ fn devices_are_kept_in_the_vault() {
     assert!(v.get(DEVICES).is_err());
     assert!(new_device("x", "not base64!").is_err());
 }
+
+#[test]
+fn answering_show_changes_the_version() {
+    let id = vec!["a974".to_string()];
+    // The question waiting, then the same id as a value to show.
+    assert_ne!(version_of(&id, &[]), version_of(&[], &id));
+    assert_eq!(version_of(&[], &[]), "");
+}
