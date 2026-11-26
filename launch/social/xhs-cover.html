@@ -1,0 +1,123 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --ink: #1d1d1f;
+    --ink2: #6e6e73;
+    --accent: #635bff;
+    --term: #141416;
+    --bar: #202023;
+    --t: #e8e8ea;
+    --dim: #8b8b92;
+    --amber: #f5a524;
+    --amberText: #ffd38f;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1242px; height: 1660px; }
+  body {
+    font-family: -apple-system, "SF Pro Display", "PingFang SC", sans-serif;
+    background: #f4f4f7;
+    overflow: hidden;
+    position: relative;
+    color: var(--ink);
+  }
+  .blob1, .blob2 { position: absolute; border-radius: 50%; }
+  .blob1 { width: 1100px; height: 1100px; left: -380px; top: -420px;
+    background: radial-gradient(circle, rgba(165,160,255,0.55), rgba(165,160,255,0) 65%); }
+  .blob2 { width: 1000px; height: 1000px; right: -380px; bottom: -380px;
+    background: radial-gradient(circle, rgba(255,186,150,0.5), rgba(255,186,150,0) 65%); }
+  .wrap { position: relative; padding: 120px 92px 0; }
+  h1 {
+    font-weight: 800;
+    font-size: 118px;
+    line-height: 1.16;
+    letter-spacing: -0.01em;
+  }
+  h1 .hl {
+    background: var(--accent);
+    color: #fff;
+    border-radius: 18px;
+    padding: 0 18px;
+    margin: 0 4px;
+    box-decoration-break: clone;
+  }
+  .card {
+    margin-top: 76px;
+    background: var(--term);
+    border-radius: 30px;
+    overflow: hidden;
+    box-shadow: 0 50px 110px rgba(20,20,40,0.28), 0 0 0 1px rgba(0,0,0,0.25);
+  }
+  .bar { height: 60px; background: var(--bar); display: flex; align-items: center; gap: 13px; padding: 0 26px; }
+  .bar i { width: 18px; height: 18px; border-radius: 9px; display: block; }
+  .bar span { flex: 1; text-align: center; color: var(--dim); font-size: 25px; margin-right: 80px; }
+  .body { padding: 36px 44px 44px; font-family: "SF Mono", ui-monospace, Menlo, "PingFang SC", monospace; font-size: 37px; line-height: 1.5; }
+  .row { display: flex; }
+  .g { width: 1.5em; flex: none; }
+  .prompt { background: rgba(255,255,255,0.07); border-radius: 14px; padding: 12px 18px; margin: 0 -18px 18px; color: var(--t); }
+  .prompt .g { color: var(--dim); }
+  .tok { color: #fff; background: rgba(255,107,107,0.3); box-shadow: 0 0 0 2px rgba(255,107,107,0.65); border-radius: 6px; padding: 0 4px; }
+  .warn { color: var(--amberText); margin-bottom: 6px; }
+  .warn .g { color: var(--amber); }
+  .warn b { color: var(--amber); }
+  .divider { display: flex; align-items: center; gap: 22px; color: var(--dim); font-family: -apple-system, "PingFang SC", sans-serif; font-size: 27px; margin: 34px 0 30px; }
+  .divider::before, .divider::after { content: ""; flex: 1; height: 2px; background: rgba(255,255,255,0.15); }
+  .ai { color: var(--t); }
+  .ai .g { color: #fff; }
+  .ai b { color: var(--amber); }
+  .after {
+    margin-top: 44px;
+    background: #fff;
+    border-radius: 26px;
+    padding: 30px 40px 32px;
+    box-shadow: 0 30px 70px rgba(20,20,40,0.12), 0 0 0 1px rgba(0,0,0,0.06);
+    font-family: "SF Mono", ui-monospace, Menlo, "PingFang SC", monospace;
+    font-size: 33px; line-height: 1.6; color: #3a3a3f;
+  }
+  .after .lbl { font-family: -apple-system, "PingFang SC", sans-serif; font-size: 26px; font-weight: 600; color: var(--accent); letter-spacing: 0.04em; margin-bottom: 8px; }
+  .after .ok { color: #16a34a; margin-right: 14px; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; background: var(--accent); color: #fff; border-radius: 999px; padding: 2px 18px; font-family: -apple-system, "PingFang SC", sans-serif; font-weight: 600; font-size: 30px; vertical-align: 2px; }
+  .red { color: var(--accent); font-weight: 600; }
+  .foot {
+    position: absolute; left: 92px; right: 92px; bottom: 96px;
+    display: flex; align-items: flex-end; justify-content: space-between;
+  }
+  .joke { font-size: 44px; font-weight: 600; color: var(--ink); line-height: 1.35; }
+  .joke small { display: block; font-size: 30px; font-weight: 500; color: var(--ink2); margin-top: 10px; }
+  .brand { display: flex; align-items: center; gap: 16px; font-size: 40px; font-weight: 700; letter-spacing: -0.02em; }
+</style>
+</head>
+<body>
+  <div class="blob1"></div>
+  <div class="blob2"></div>
+  <div class="wrap">
+    <h1>你会把<span class="hl">密码</span><br>直接粘贴给 AI 吗？</h1>
+
+    <div class="card">
+      <div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span>agent</span></div>
+      <div class="body">
+        <div class="row prompt"><span class="g">&gt;</span><span>token 给你：<span class="tok">ghp_7Kq2vX9mZ4pL…</span></span></div>
+        <div class="row warn"><span class="g">⏺</span><span>这是明文 token，<b>建议立即撤销。</b></span></div>
+        <div class="divider">第二天 · 新会话</div>
+        <div class="row prompt"><span class="g">&gt;</span><span>CI 过了吗？</span></div>
+        <div class="row ai"><span class="g">⏺</span><span>我没有你的 token，<b>能再贴一次吗？</b></span></div>
+      </div>
+    </div>
+    <div class="after">
+      <div class="lbl">后来</div>
+      <div><span class="ok">✓</span>已保存 <span class="pill"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="#fff"/></svg>github-ci</span></div>
+      <div><span class="ok" style="visibility:hidden">✓</span>Authorization: Bearer <span class="red">[redacted]</span></div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <div class="joke">我的 token 平均寿命：一次对话。<small>AI 能用，但永远看不到。</small></div>
+    <div class="brand">
+      <svg width="58" height="58" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#1d1d1f"/><circle cx="12" cy="9.6" r="3.3" fill="#fff"/><path d="M10.3 11.8 9.4 17.6h5.2l-.9-5.8z" fill="#fff"/></svg>
+      keymule
+    </div>
+  </div>
+</body>
+</html>
