@@ -9,7 +9,7 @@ credentials), so it isn't part of CI. Run it before a release:
 """
 import http.server, json, os, subprocess, sys, tempfile, threading, time, urllib.parse
 
-BIN, WHICH = sys.argv[1], sys.argv[2]  # WHICH: playwright | devtools
+BIN, WHICH = os.path.abspath(sys.argv[1]), sys.argv[2]  # WHICH: playwright | devtools
 PASSWORD = "s3cret-Pa55-word!"
 got = {}
 
@@ -51,8 +51,9 @@ def check(label, ok, detail=""):
 
 class Client:
     def __init__(self, argv, extra=None):
+        # cwd: Playwright MCP writes its logs into .playwright-mcp/ there
         self.p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-                                  env=dict(env, **(extra or {})), stderr=subprocess.DEVNULL)
+                                  env=dict(env, **(extra or {})), stderr=subprocess.DEVNULL, cwd=home)
         self.n = 0
         self.raw = []
         self.rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}})

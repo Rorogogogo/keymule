@@ -29,7 +29,18 @@ use pairing::*;
 use scan::*;
 
 const INDEX: &str = include_str!("ui/web/index.html");
-const APP_JS: &str = include_str!("ui/web/app.js");
+// The page's script, kept in parts by topic and served as one file, in this
+// order: later parts use what earlier ones define, and start.js runs the page.
+const APP_JS: &str = concat!(
+    include_str!("ui/web/js/core.js"),
+    include_str!("ui/web/js/actions.js"),
+    include_str!("ui/web/js/lists.js"),
+    include_str!("ui/web/js/usage.js"),
+    include_str!("ui/web/js/page.js"),
+    include_str!("ui/web/js/start.js"),
+    include_str!("ui/web/js/approvals.js"),
+    include_str!("ui/web/js/notify.js"),
+);
 const APP_CSS: &str = include_str!("ui/web/app.css");
 
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; \

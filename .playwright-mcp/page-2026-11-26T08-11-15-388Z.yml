@@ -1,5 +1,0 @@
-- generic [ref=e2]:
-  - generic [ref=e3]:
-    - text: Email
-    - textbox "Email" [ref=e4]
-  - button "Next" [ref=e5]
