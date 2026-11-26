@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::store::ServerMeta;
 use crate::store::testing::MemVault;

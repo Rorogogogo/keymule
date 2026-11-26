@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::store::testing::MemVault;
 use crate::store::{Auth, Credential};
