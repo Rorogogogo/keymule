@@ -12,7 +12,7 @@
 //! tab's origin is checked again right before each field is filled, so a
 //! lookalike page (or one the sign-in redirected to) never gets it.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -96,7 +96,7 @@ fn chrome_path() -> Result<PathBuf> {
         ];
         let home = std::env::var_os("HOME").map(PathBuf::from);
         for app in apps {
-            candidates.push(Path::new("/Applications").join(app));
+            candidates.push(std::path::Path::new("/Applications").join(app));
             if let Some(h) = &home {
                 candidates.push(h.join("Applications").join(app));
             }
