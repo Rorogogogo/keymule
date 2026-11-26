@@ -220,6 +220,11 @@ fn valid_var(v: &str) -> bool {
 /// handed over only as a file (`--file`) needs no env var.
 fn vars_for(store: &Store, name: &str, given: &[String], files: &[String]) -> Result<Vec<String>> {
     let preset = presets::get_or_generic(&store.get(name)?.service);
+    if preset.kind == presets::Kind::Login {
+        bail!(
+            "\"{name}\" is a website login: it's only filled into its site's sign-in page, with sign_in"
+        );
+    }
     let vars = if preset.kind == presets::Kind::AwsKeys {
         if !given.is_empty() {
             bail!(

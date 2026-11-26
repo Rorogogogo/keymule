@@ -27,6 +27,9 @@ pub enum Kind {
     /// An SSH login: a password or private key for one server and account,
     /// only used by `keymule ssh`.
     Ssh,
+    /// A website's username and password, only filled into that site's
+    /// sign-in page in the keymule browser (`sign_in`).
+    Login,
 }
 
 #[derive(Debug)]
@@ -211,6 +214,23 @@ pub const PRESETS: &[Preset] = &[
         extra_hosts: &[],
         cli_env: None,
         kind: Kind::Ssh,
+    },
+    Preset {
+        id: "login",
+        title: "Website login",
+        default_url: None,
+        url_example: "https://github.com/login",
+        auth: AuthKind::Basic,
+        verify_path: None,
+        accept: "",
+        keywords: &[], // added with add_website_login, not guessed from a paste
+        hint: "A username and password for one website. Sign in with \
+               sign_in(credential=\"<name>\") once the site's sign-in page is open in the keymule \
+               browser: keymule asks the user, then types them into that page itself, only on that \
+               site. Not for http_request or keymule exec.",
+        extra_hosts: &[],
+        cli_env: None,
+        kind: Kind::Login,
     },
     Preset {
         id: "aws",
