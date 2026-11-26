@@ -78,6 +78,12 @@ pub fn key_problem() -> Option<String> {
     }
 }
 
+/// What to do when this process can't read the keychain because keymule was
+/// updated after it started.
+pub const UPDATED_HELP: &str = "keymule was updated after this copy of it started, and macOS only lets \
+the new one read keymule's keychain item. Reconnect keymule in your agent (/mcp in Claude Code), \
+or restart the agent (or the keymule menu-bar app)";
+
 pub enum KeySource {
     Keychain,
     Passphrase(String),
@@ -158,6 +164,9 @@ impl EncVault {
                     .set_password(&B64.encode(k))
                     .context("saving keymule's vault key to the keychain")?;
                 k
+            }
+            Err(e) if cfg!(target_os = "macos") && crate::app::update::replaced() => {
+                return Err(anyhow!(e)).context(UPDATED_HELP);
             }
             Err(e) => {
                 return Err(anyhow!(e)).context(
@@ -364,6 +373,7 @@ impl Vault for EncVault {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::store::testing::MemVault;
 

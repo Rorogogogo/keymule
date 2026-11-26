@@ -216,6 +216,10 @@ pub(super) fn list() -> Result<()> {
             presets::Kind::Password => ("for programs: keymule exec --env VAR", String::new()),
             presets::Kind::PrivateKey => ("for programs: keymule exec --file KEY", String::new()),
             presets::Kind::AwsKeys => ("for programs: keymule exec (AWS_* vars)", String::new()),
+            presets::Kind::Login => (
+                c.url.as_str(),
+                format!("website login · {}", c.auth.label()),
+            ),
         };
         println!("{name:<16} {:<11} {:<40} {auth}", c.service, url);
         if !c.description.is_empty() {
@@ -256,6 +260,7 @@ pub(super) fn list_json() -> Result<()> {
                     presets::Kind::PrivateKey => "private-key",
                     presets::Kind::AwsKeys => "aws",
                     presets::Kind::Ssh => "ssh",
+                    presets::Kind::Login => "login",
                 },
                 "ssh": used.ssh.as_ref().map(|t| serde_json::json!({
                     "host": t.host,

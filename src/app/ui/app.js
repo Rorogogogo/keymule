@@ -71,6 +71,7 @@ const ICONS = {
   sidebar: [['rect', { x: 3, y: 4, width: 18, height: 16, rx: 2.5 }], ['path', { d: 'M9 4v16' }]],
   sun: [['circle', { cx: 12, cy: 12, r: 4 }], ['path', { d: 'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4' }]],
   moon: [['path', { d: 'M20.5 14.1A8.5 8.5 0 1 1 9.9 3.5a6.6 6.6 0 0 0 10.6 10.6z' }]],
+  globe: [['circle', { cx: 12, cy: 12, r: 9.5 }], ['path', { d: 'M2.5 12h19M12 2.5c3.2 3.4 3.2 15.6 0 19M12 2.5c-3.2 3.4-3.2 15.6 0 19' }]],
   terminal: [['rect', { x: 2.5, y: 4, width: 19, height: 16, rx: 2 }], ['path', { d: 'm7 9 3 3-3 3M13 15h4' }]],
   monitor: [['rect', { x: 2.5, y: 4, width: 19, height: 13, rx: 2 }], ['path', { d: 'M8 21h8M12 17v4' }]],
   more: [['circle', { cx: 5, cy: 12, r: 1 }], ['circle', { cx: 12, cy: 12, r: 1 }], ['circle', { cx: 19, cy: 12, r: 1 }]],
@@ -568,6 +569,10 @@ function credSub(c) {
       ? [mono(c.ssh.label), c.ssh.auth, mono(`keymule ssh ${c.name} -- <command>`)]
       : ['SSH login with no server set']
   }
+  if (c.kind === 'login') {
+    const user = (c.auth || '').replace(/^basic \((.*)\)$/, '$1')
+    return [c.service, mono(c.url), user, 'filled by sign_in in the keymule browser']
+  }
   if (c.kind && c.kind !== 'http') return [c.service, USE_HINT[c.kind]]
   return [c.service, (c.hosts || []).join(', '), c.auth, ...(c.installed || []).map(i => `copied to ${i}`)]
 }
@@ -579,7 +584,7 @@ function renderCreds(creds) {
     const status = c.missing_secret ? badge('Missing', 'bad') : c.file_edited ? badge('Edited outside keymule', 'warn') : badge('Active', 'ok')
     const open = isOpen(c.name)
     return h('div', rowAttrs(c.name),
-      ico(c.kind === 'ssh' ? 'terminal' : 'key'),
+      ico(c.kind === 'ssh' ? 'terminal' : c.kind === 'login' ? 'globe' : 'key'),
       h('span', { class: 'body' },
         rowTitle(c.name),
         h('span', { class: open ? 'sub wrap' : 'sub', title: open ? null : credSub(c).map(x => x.textContent ?? x).join(' · ') }, join(credSub(c))),

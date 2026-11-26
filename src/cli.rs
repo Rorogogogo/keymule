@@ -176,6 +176,17 @@ pub enum Cmd {
         #[arg(last = true)]
         command: Vec<String>,
     },
+    /// Run a browser MCP server (Playwright MCP, Chrome DevTools MCP) on
+    /// keymule's own Chrome, so `sign_in` can fill website logins into it.
+    /// Stored website passwords are hidden from the server's replies.
+    ///
+    /// claude mcp add playwright -- keymule browser -- npx @playwright/mcp@latest
+    #[command(verbatim_doc_comment)]
+    Browser {
+        /// The browser MCP server to run.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     /// Turn an MCP server secret no MCP server uses into a credential: an
     /// SSH login or a password. The value stays inside keymule; you confirm
     /// in a dialog.

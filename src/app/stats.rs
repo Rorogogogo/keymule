@@ -38,17 +38,18 @@ impl Kind {
 pub fn kind(method: &str) -> Option<Kind> {
     match method {
         "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" => Some(Kind::Api),
-        "EXEC" | "SSH" | "GH-SECRET" | "INSTALL" => Some(Kind::Command),
+        "EXEC" | "SSH" | "GH-SECRET" | "INSTALL" | "SIGN-IN" => Some(Kind::Command),
         "START" => Some(Kind::Mcp),
         "REVEAL" => Some(Kind::Reveal),
         _ => None,
     }
 }
 
-/// Whether a use failed. Only API calls and gh-secret uploads record how
-/// they went (status 0 there means the request never got an answer).
+/// Whether a use failed. Only API calls, gh-secret uploads and website
+/// sign-ins record how they went (status 0 there means the request never
+/// got an answer).
 fn failed(method: &str, status: u64) -> bool {
-    let has_outcome = kind(method) == Some(Kind::Api) || method == "GH-SECRET";
+    let has_outcome = kind(method) == Some(Kind::Api) || matches!(method, "GH-SECRET" | "SIGN-IN");
     has_outcome && !(200..300).contains(&status)
 }
 
