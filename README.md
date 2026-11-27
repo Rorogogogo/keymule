@@ -99,7 +99,7 @@ Agent:  Build #482 failed in "Integration tests"…
 - 🧑‍💻 **You approve the risky parts.** A new program, a new host, copying to GitHub or deleting asks you in a keymule dialog the agent can't click. **Allow all** turns the questions off for one project; deleting always asks.
 - 🧰 **CLI tools too.** `keymule exec github --env GH_TOKEN -- gh pr create …` gives the token to that program only, and hides it from its output.
 - 🔑 **Passwords, private keys and AWS keys.** Not just API tokens: `keymule exec db-pass --env PGPASSWORD -- psql …`, `keymule exec deploy-key --file KEY -- ssh -i {KEY} host` (the key goes in a temporary file only you can read, removed afterwards), `keymule exec aws-prod -- aws s3 ls` (gets `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`). Pasted ones are caught before they're sent, and the popup takes several lines for a key.
-- 🌐 **Website logins for browser agents.** Run Playwright MCP or Chrome DevTools MCP through `keymule browser`, and the agent signs in with `sign_in`: keymule asks you, then types the username and password into the page itself, only on that login's exact site. The password is hidden from everything the browser tool returns.
+- 🌐 **Website logins for browser agents.** Run Playwright MCP or Chrome DevTools MCP through `keymule browser` (or use Claude in Chrome in the window `keymule browser --open` opens), and the agent signs in with `sign_in`: keymule asks you, then types the username and password into the page itself, only on that login's exact site. The password is hidden from everything the browser tool returns.
 - 🐙 **GitHub Actions secrets.** `keymule gh-secret` copies several secrets into a repo in one dialog.
 - 🖥 **Menu bar and page.** On macOS keymule lives in the menu bar and opens its page in its own window: credentials, MCP servers, live activity, leak scan. **Reveal** shows a value in a keymule window when *you* need to see it, never on the page or in a terminal.
 - 🐧 **Linux and dev containers.** Without a screen, keymule's questions wait in the page, answered from a browser you've paired.
@@ -238,6 +238,7 @@ up next to itself as `<name>.keymule-bak`.
 | `keymule add ssh --host H --username U [--port P] [--key \| --key-file PATH] [--dialog]` | Store an SSH login for one server: a password (typed in the terminal, or the dialog), a private key (pasted in the dialog), or a key file already on this machine (used where it is) |
 | `keymule ssh <name> [-- <command…>]` | Log in to that server and run a command (or open a session). keymule answers ssh's password prompt itself, or hands it the key as a private file; you approve once per folder, and the secret is scrubbed from the output |
 | `keymule browser -- <browser MCP server…>` | Run Playwright MCP or Chrome DevTools MCP on keymule's own Chrome, so `sign_in` can fill website logins into it. Stored website passwords are hidden from the server's replies |
+| `keymule browser --open [URL]` | Open keymule's Chrome in a window that stays open, for Claude in Chrome: at `URL`, or on the extension's page until it's installed there |
 | `keymule convert <name> --to ssh\|password [--host H --username U --port P]` | Turn an MCP server secret that no MCP server runs into an SSH login or a password, after a yes in a dialog. The value moves inside keymule; you don't type it again |
 | `keymule edit <name> --url/--username/--service/--description` | Change metadata (an SSH login: `--host/--port/--username/--key-file`; an MCP server secret: `--description`). A new host needs terminal confirmation |
 | `keymule rename <name> <new-name> [--description D]` | Give a credential a better name |
@@ -369,6 +370,25 @@ the browser tool at that Chrome and hides every stored website password from wha
 back. In a container without a screen, Chrome runs headless (`KEYMULE_BROWSER_HEADLESS=1` forces
 that anywhere); set `KEYMULE_CHROME` to use a particular browser.
 
+#### With Claude in Chrome
+
+```sh
+keymule browser --open
+```
+
+This opens keymule's Chrome in a window of its own, on the Claude in Chrome extension's page.
+Add the extension there once and sign in to Claude in it; in Claude Code, `/chrome` connects
+(pick this browser if it asks which). From then on Claude opens sign-in pages in that window and
+calls `sign_in` as above. Run `keymule browser --open` again after closing the window, or with an
+address to open it there.
+
+keymule copies Claude's native messaging manifest (how the extension reaches Claude Code) into
+its profile, since Chrome looks for it there, and turns off Chrome's offer to save passwords in
+that profile. Claude in Chrome's replies don't pass through keymule the way a browser MCP
+server's do, so keymule can't scrub them; the password is only ever in the page's password
+field, and keymule clears that field once the form is submitted. Keep using your everyday
+Chrome for everything else; `sign_in` only fills into keymule's.
+
 ### Agents
 
 `keymule init` sets up each agent it finds on your machine:
@@ -484,7 +504,8 @@ time they're used, or all at once with `keymule migrate`.
 - **0.19**: ✅ page questions that never get stuck, notifications, signing in with a paired browser; the Usage view; update notices
 - **0.20**: ✅ website logins for browser agents (`keymule browser`, `sign_in`)
 - **0.21**: ✅ the page rebuilt in React with the same look; revealed values in the page arrive at once
-- **Next**: website logins in Claude in Chrome, more presets, database auth proxy, SSH agent, git/docker credential helpers
+- **0.22**: ✅ website logins in Claude in Chrome (`keymule browser --open`)
+- **Next**: more presets, database auth proxy, SSH agent, git/docker credential helpers
 - **Later**: Touch ID approval for sensitive credentials, short-lived credentials (AWS STS, GitHub App tokens)
 
 ## 🗂 Project structure

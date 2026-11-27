@@ -179,7 +179,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 servers::exec(store::vault().as_ref(), &name, &rename, &command)
             }
         }
-        Cmd::Browser { command } => browser::run(&command).await,
+        Cmd::Browser { open, command } => match open {
+            Some(url) => browser::open(&url).await,
+            None => browser::run(&command).await,
+        },
         Cmd::Ssh { name, command } => ssh::run(store::vault().as_ref(), &name, &command),
         Cmd::Convert {
             name,
