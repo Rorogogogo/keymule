@@ -6,6 +6,10 @@
 //! (Playwright MCP, Chrome DevTools MCP) at it, and sits between the agent
 //! and the tool, hiding stored website passwords from every reply.
 //!
+//! `keymule browser --open` starts the same Chrome in a window of its own,
+//! for agents that work inside the browser (Claude in Chrome, installed in
+//! keymule's profile).
+//!
 //! The `sign_in` MCP tool then connects to the same Chrome, finds the tab
 //! that is on the login's site, asks the user, and types the username and
 //! password into the page itself. The site is sealed with the secret, and the
@@ -32,11 +36,13 @@ mod proxy;
 mod sign_in;
 #[cfg(test)]
 mod tests;
+mod window;
 
 use cdp::*;
 use chrome::*;
 pub use proxy::*;
 pub use sign_in::*;
+pub use window::open;
 
 /// What replaces a stored website password in the browser tool's replies.
 pub const HIDDEN: &str = "[website password hidden by keymule]";

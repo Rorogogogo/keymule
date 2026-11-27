@@ -1,5 +1,7 @@
 //! Finding Chrome, and starting keymule's own (or finding the one already running).
 
+use std::path::Path;
+
 use super::*;
 
 pub(super) fn chrome_path() -> Result<PathBuf> {
@@ -80,15 +82,30 @@ pub(super) async fn running() -> Option<State> {
     alive(&state).await.then_some(state)
 }
 
-/// keymule's Chrome: the one already running, or a new one. The bool says
-/// whether this call started it.
-pub(super) async fn ensure_chrome() -> Result<(State, Option<std::process::Child>)> {
+pub(super) fn profile_dir() -> Result<PathBuf> {
+    Ok(browser_dir()?.join("profile"))
+}
+
+/// How to start keymule's Chrome when it isn't running.
+pub(super) struct Start<'a> {
+    /// The first tab's address.
+    pub(super) url: &'a str,
+    /// A window of its own that outlives this keymule (`keymule browser
+    /// --open`), rather than one that goes with the browser tool.
+    pub(super) window: bool,
+}
+
+/// keymule's Chrome: the one already running, or a new one. The child is
+/// Some when this call started it.
+pub(super) async fn ensure_chrome(
+    start: Start<'_>,
+) -> Result<(State, Option<std::process::Child>)> {
     if let Some(s) = running().await {
         return Ok((s, None));
     }
-    let dir = browser_dir()?;
-    let profile = dir.join("profile");
+    let profile = profile_dir()?;
     std::fs::create_dir_all(&profile)?;
+    prepare_profile(&profile);
     let port_file = profile.join("DevToolsActivePort");
     let _ = std::fs::remove_file(&port_file);
     let chrome = chrome_path()?;
@@ -98,14 +115,25 @@ pub(super) async fn ensure_chrome() -> Result<(State, Option<std::process::Child
         .arg("--remote-debugging-address=127.0.0.1")
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
-        .arg("about:blank")
+        .arg(start.url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let no_screen = cfg!(target_os = "linux")
         && std::env::var_os("DISPLAY").is_none()
         && std::env::var_os("WAYLAND_DISPLAY").is_none();
-    if no_screen || std::env::var_os("KEYMULE_BROWSER_HEADLESS").is_some_and(|v| v == "1") {
+    if start.window {
+        if no_screen {
+            bail!("there's no screen here to open a browser window on");
+        }
+        // Its own process group, so ending this command (or Ctrl-C in its
+        // terminal) leaves the window open.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    }
+    if (no_screen && !start.window)
+        || std::env::var_os("KEYMULE_BROWSER_HEADLESS").is_some_and(|v| v == "1")
+    {
         cmd.arg("--headless=new");
     }
     let child = cmd
@@ -137,4 +165,94 @@ pub(super) async fn ensure_chrome() -> Result<(State, Option<std::process::Child
     };
     std::fs::write(state_path()?, serde_json::to_string(&state)?)?;
     Ok((state, Some(child)))
+}
+
+// ---- the profile ------------------------------------------------------------
+
+/// Before Chrome starts on keymule's profile: let the Claude in Chrome
+/// extension reach Claude Code from it, and keep Chrome from offering to save
+/// the passwords sign_in types (the profile would keep a copy).
+pub(super) fn prepare_profile(profile: &Path) {
+    copy_native_hosts(&native_host_dirs(), profile);
+    no_saved_passwords(profile);
+}
+
+/// Where Chrome-family browsers keep the user's native messaging hosts: the
+/// small manifests that tell an extension which program to talk to.
+fn native_host_dirs() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return vec![];
+    };
+    let browsers: &[&str] = if cfg!(target_os = "macos") {
+        &[
+            "Library/Application Support/Google/Chrome",
+            "Library/Application Support/Chromium",
+            "Library/Application Support/Microsoft Edge",
+            "Library/Application Support/BraveSoftware/Brave-Browser",
+        ]
+    } else {
+        &[
+            ".config/google-chrome",
+            ".config/chromium",
+            ".config/microsoft-edge",
+            ".config/BraveSoftware/Brave-Browser",
+        ]
+    };
+    browsers
+        .iter()
+        .map(|b| home.join(b).join("NativeMessagingHosts"))
+        .collect()
+}
+
+/// Chrome looks for the user's native messaging hosts inside the profile it
+/// runs on, so keymule's own profile can't see the one Claude Code installed.
+/// Copy Anthropic's (Claude in Chrome's) manifests in, and no others; on
+/// every start, so a reinstalled Claude Code's new path is picked up.
+/// (On Windows the hosts are in the registry, which every profile sees.)
+pub(super) fn copy_native_hosts(from: &[PathBuf], profile: &Path) {
+    let to = profile.join("NativeMessagingHosts");
+    let mut done = std::collections::HashSet::new();
+    for dir in from {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !(name.starts_with("com.anthropic.") && name.ends_with(".json"))
+                || !done.insert(name.clone())
+            {
+                continue;
+            }
+            let Ok(text) = std::fs::read(e.path()) else {
+                continue;
+            };
+            let dest = to.join(&name);
+            if std::fs::read(&dest).ok().as_ref() != Some(&text) {
+                let _ = std::fs::create_dir_all(&to);
+                let _ = std::fs::write(&dest, &text);
+            }
+        }
+    }
+}
+
+/// Turn off Chrome's "Save password?" in keymule's profile.
+pub(super) fn no_saved_passwords(profile: &Path) {
+    let path = profile.join("Default").join("Preferences");
+    let mut prefs: Value = match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(v @ Value::Object(_)) => v,
+            _ => return, // not ours to fix
+        },
+        Err(_) => json!({}),
+    };
+    let before = prefs.clone();
+    prefs["credentials_enable_service"] = false.into();
+    if !prefs["profile"].is_object() {
+        prefs["profile"] = json!({});
+    }
+    prefs["profile"]["password_manager_enabled"] = false.into();
+    if prefs != before {
+        let _ = std::fs::create_dir_all(path.parent().expect("has a parent"));
+        let _ = std::fs::write(&path, prefs.to_string());
+    }
 }

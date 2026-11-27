@@ -41,7 +41,7 @@ key), call add_ssh_credential, then run commands there with `keymule ssh <name> 
 add_mcp_secret is only for secrets an MCP server reads, never for SSH logins or passwords for \
 other tools (those are add_credential with service password). To sign in to a website in a \
 browser, store the login with add_website_login and call sign_in once its sign-in page is open \
-in the keymule browser (`keymule browser -- <browser MCP server>`). Never ask the user to paste a token, password or API key into the chat. If no \
+in the keymule browser (`keymule browser -- <browser MCP server>`, or the window `keymule browser --open` opens for Claude in Chrome). Never ask the user to paste a token, password or API key into the chat. If no \
 matching credential exists, call add_credential: keymule shows a secure dialog on the user's \
 screen where they type the secret, and you never see it. Ask the user for the service's base URL \
 first if needed (URLs are not secret). If a token stops working (HTTP 401), offer \
@@ -175,7 +175,7 @@ impl Server {
                         "username": username,
                         "description": c.description,
                         "how_to_use": [format!(
-                            "open the site's sign-in page in the keymule browser (your browser tool run through `keymule browser -- ...`), then sign_in(credential=\"{name}\"); the user approves each sign-in"
+                            "open the site's sign-in page in the keymule browser (your browser tool run through `keymule browser -- ...`, or with Claude in Chrome the Chrome `keymule browser --open` opened), then sign_in(credential=\"{name}\"); the user approves each sign-in"
                         )],
                         "needs_setup": serde_json::Value::Null,
                     });
@@ -332,7 +332,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Sign in to a website with a stored website login, in the keymule browser (the Chrome your browser tool uses when it runs through `keymule browser -- ...`). Open the site's sign-in page with your browser tool first. keymule asks the user, checks the tab is on exactly the login's site, types the username and password into the page and submits; two-step forms (username, then password) are handled. You never see the password, and it's hidden from the browser tool's replies. Then take a snapshot to carry on."
+        description = "Sign in to a website with a stored website login, in the keymule browser (the Chrome your browser tool uses when it runs through `keymule browser -- ...`; with Claude in Chrome, the Chrome `keymule browser --open` opened, not the user's everyday one). Open the site's sign-in page in it first. keymule asks the user, checks the tab is on exactly the login's site, types the username and password into the page and submits; two-step forms (username, then password) are handled. You never see the password: it's hidden from a browser MCP server's replies, and cleared from the page after submitting. Then take a snapshot to carry on."
     )]
     async fn sign_in(
         &self,

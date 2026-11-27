@@ -99,7 +99,11 @@ pub async fn run(command: &[String]) -> Result<()> {
             "say which browser MCP server to run: keymule browser -- npx @playwright/mcp@latest"
         )
     })?;
-    let (state, mut chrome) = ensure_chrome().await?;
+    let (state, mut chrome) = ensure_chrome(Start {
+        url: "about:blank",
+        window: false,
+    })
+    .await?;
     let mut args: Vec<String> = rest.to_vec();
     args.extend(endpoint_args(command, &state.ws)?);
     let mut child = tokio::process::Command::new(program)

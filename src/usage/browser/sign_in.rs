@@ -149,7 +149,9 @@ pub(super) async fn find_tab(cdp: &mut Cdp, origin: &str) -> Result<(String, Vec
 pub const NOT_RUNNING: &str = "The keymule browser isn't running. sign_in fills logins into the \
 Chrome that `keymule browser` starts, so run your browser tool through it, e.g. for Claude Code:\n  \
 claude mcp add playwright -- keymule browser -- npx @playwright/mcp@latest\n\
-then reconnect it (/mcp) and open the site's sign-in page with it.";
+then reconnect it (/mcp) and open the site's sign-in page with it. With Claude in Chrome, run \
+`keymule browser --open` instead: it opens keymule's Chrome in a window, where the user adds \
+the extension once.";
 
 /// Fill `login` into the keymule browser's tab on its site, after `ask`
 /// says yes. Returns what happened, for the agent.
@@ -169,7 +171,8 @@ pub async fn sign_in(
         };
         bail!(
             "No tab in the keymule browser is on {} (open: {open}). Open the site's sign-in page \
-             with your browser tool first, then call sign_in again.",
+             in it first, then call sign_in again. (With Claude in Chrome: in keymule's Chrome, \
+             the one `keymule browser --open` opened, not the user's everyday Chrome.)",
             login.origin
         );
     }
