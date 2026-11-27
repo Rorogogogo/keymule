@@ -483,6 +483,7 @@ time they're used, or all at once with `keymule migrate`.
 - **0.15**: ✅ ready-made downloads, a one-line installer and Homebrew
 - **0.19**: ✅ page questions that never get stuck, notifications, signing in with a paired browser; the Usage view; update notices
 - **0.20**: ✅ website logins for browser agents (`keymule browser`, `sign_in`)
+- **0.21**: ✅ the page rebuilt in React with the same look; revealed values in the page arrive at once
 - **Next**: website logins in Claude in Chrome, more presets, database auth proxy, SSH agent, git/docker credential helpers
 - **Later**: Touch ID approval for sensitive credentials, short-lived credentials (AWS STS, GitHub App tokens)
 
