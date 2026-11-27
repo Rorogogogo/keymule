@@ -22,3 +22,25 @@ jobs:
       - run: cargo test
       - run: cargo build
       - run: python3 -I tests/e2e.py "$PWD/target/debug/keymule"
+
+  # The page is built from ui/ into src/app/ui/dist, which is committed so
+  # the crate builds without Node. Make sure it matches the source.
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
+      - name: src/app/ui/dist matches ui/
+        run: |
+          if ! git diff --exit-code -- src/app/ui/dist; then
+            echo "::error::src/app/ui/dist is out of date. Run 'npm run build' in ui/ and commit it."
+            exit 1
+          fi

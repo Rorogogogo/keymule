@@ -1,0 +1,25 @@
+{
+  "name": "keymule-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The keymule page (keymule ui and the menu-bar window). Built into src/app/ui/dist, which the Rust binary embeds.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "e2e": "node tests/e2e.mjs"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.1.6",
+    "@types/react-dom": "19.1.6",
+    "@vitejs/plugin-react": "4.5.2",
+    "playwright-core": "1.65.1",
+    "typescript": "5.8.3",
+    "vite": "6.4.6"
+  }
+}

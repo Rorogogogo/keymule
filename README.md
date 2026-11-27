@@ -498,7 +498,10 @@ src/
   agents/        the MCP server, the paste hook (hook/), the read-back guard, init, adopt
   usage/         using a secret without showing it: HTTP, exec, MCP servers, remote, git, GitHub secrets
   scan/          finding secrets: before a message is sent, and leaks after the fact (doctor)
-  app/           the local page (ui/) and the macOS menu bar app
+  app/           the local page's server (ui.rs, ui/) and the macOS menu bar app
+ui/              the page itself: React + TypeScript, built into src/app/ui/dist (see ui/README.md)
+website/         keymule.nomoreide.com
+launch/          the launch film (Remotion)
 tests/e2e.py     end-to-end tests against a built binary
 ```
 
